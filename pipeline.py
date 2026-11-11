@@ -36,11 +36,15 @@ from technicals import TechnicalsAnalyzer
 
 # ── Config ───────────────────────────────────────────────────────────
 SYMBOL        = os.environ.get("SYMBOL",        "CANBK")
+# Multiple symbols: SYMBOLS=CANBK,HDFC,INFY overrides SYMBOL
+_SYMBOLS_ENV  = os.environ.get("SYMBOLS",       "")
+SYMBOLS       = [s.strip() for s in _SYMBOLS_ENV.split(",") if s.strip()] or [SYMBOL]
 START_DATE    = os.environ.get("START_DATE",    "2024-01-10")
 END_DATE      = os.environ.get("END_DATE",      "2024-12-31")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", 90))
 MAX_HOLD_DAYS = int(os.environ.get("MAX_HOLD_DAYS",  5))
 COUNT         = int(os.environ.get("COUNT",          10))   # random dates to generate
+WORKERS       = int(os.environ.get("WORKERS",         1))    # parallel workers
 OLLAMA_URL    = os.environ.get("OLLAMA_URL",    "http://localhost:11434/api/chat")
 OLLAMA_MODEL  = os.environ.get("OLLAMA_MODEL",  "nemotron-bolt-e4b-16k")
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", 300))  # seconds; Nemotron needs ~170s on CPU
@@ -509,18 +513,59 @@ def random_trading_days(start: str, end: str, count: int, symbol: str) -> list[s
 
 if __name__ == "__main__":
     init_db()
-    ta = TechnicalsAnalyzer()
 
-    dates = random_trading_days(START_DATE, END_DATE, COUNT, SYMBOL)
-    if not dates:
-        print(f"\nAll dates in {START_DATE}→{END_DATE} already generated for {SYMBOL}.")
-        print("Extend START_DATE/END_DATE or add more SYMBOL runs.")
-    else:
-        print(f"\nGenerating {len(dates)} random dates for {SYMBOL}")
+    # Build full work list: (symbol, date) pairs across all symbols
+    work: list[tuple[str, str]] = []
+    for sym in SYMBOLS:
+        dates = random_trading_days(START_DATE, END_DATE, COUNT, sym)
+        if not dates:
+            print(f"All dates already generated for {sym}.")
+        else:
+            print(f"Queuing {len(dates)} dates for {sym}")
+            work.extend((sym, d) for d in dates)
+
+    if not work:
+        print("Nothing to do. Extend START_DATE/END_DATE or add more symbols.")
+    elif WORKERS <= 1:
+        ta = TechnicalsAnalyzer()
         generated = 0
-        for date in dates:
-            row = generate_sample(ta, SYMBOL, date)
+        for sym, date in work:
+            row = generate_sample(ta, sym, date)
             if row:
                 _store(row)
                 generated += 1
+        print(f"\nDone. {generated} new samples stored in {DB_PATH}")
+    else:
+        # NOTE: With a single Ollama instance, LLM calls are still sequential
+        # (Ollama queues them). Speedup comes from parallel candle loading,
+        # technicals computation, and outcome simulation — and from running
+        # multiple symbols whose LLM calls can interleave in Ollama's queue.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if HF_MODEL:
+            print(f"\nParallel generation: {WORKERS} workers | HF model — true parallel inference")
+        else:
+            print(f"\nParallel generation: {WORKERS} workers | "
+                  f"note: single Ollama instance queues LLM calls; "
+                  f"speedup from parallel data loading + multi-symbol interleaving")
+
+        def _job(sym_date: tuple[str, str]) -> dict | None:
+            sym, date = sym_date
+            ta_local = TechnicalsAnalyzer()   # one per thread — avoids shared state
+            row = generate_sample(ta_local, sym, date)
+            if row:
+                _store(row)
+            return row
+
+        generated = 0
+        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            futures = {pool.submit(_job, item): item for item in work}
+            for f in as_completed(futures):
+                try:
+                    if f.result():
+                        generated += 1
+                except Exception as e:
+                    sym, date = futures[f]
+                    print(f"  [error] {sym} {date}: {e}")
+
         print(f"\nDone. {generated} new samples stored in {DB_PATH}")

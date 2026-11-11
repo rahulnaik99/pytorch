@@ -24,8 +24,11 @@ Fine-tune a 4B LLM (Nemotron Bolt) to make NSE equity trading decisions using te
 ```bash
 pip install -r requirements.txt
 
-# 1. Generate training data (uses Ollama for LLM decisions)
+# Data generation
 SYMBOL=CANBK START_DATE=2024-01-01 END_DATE=2024-06-30 python pipeline.py
+
+# Parallel date generation (4 workers — speeds up data loading; LLM calls still queue in Ollama)
+SYMBOL=CANBK COUNT=500 WORKERS=4 python pipeline.py
 
 # 2. Split to JSONL
 python splitter.py
