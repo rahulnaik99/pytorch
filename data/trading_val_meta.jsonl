@@ -1,0 +1,7 @@
+{"symbol": "CANBK", "date": "2022-12-16", "action": "SELL", "pnl": 4.2, "exit_reason": "TIME_EXIT", "confidence": 0.69, "rr": 2.37}
+{"symbol": "CANBK", "date": "2022-12-21", "action": "SELL", "pnl": 80.5, "exit_reason": "TP_HIT", "confidence": 0.86, "rr": 2.25}
+{"symbol": "CANBK", "date": "2022-12-22", "action": "SELL", "pnl": 28.9, "exit_reason": "TP_HIT", "confidence": 0.85, "rr": 2.21}
+{"symbol": "CANBK", "date": "2022-12-23", "action": "BUY", "pnl": 43.1, "exit_reason": "TP_HIT", "confidence": 0.74, "rr": 2.08}
+{"symbol": "CANBK", "date": "2022-12-28", "action": "SELL", "pnl": -10.3, "exit_reason": "TIME_EXIT", "confidence": 0.68, "rr": 1.69}
+{"symbol": "CANBK", "date": "2023-01-09", "action": "BUY", "pnl": 34.1, "exit_reason": "TP_HIT", "confidence": 0.73, "rr": 1.67}
+{"symbol": "CANBK", "date": "2023-01-26", "action": "SELL", "pnl": -33.6, "exit_reason": "SL_HIT", "confidence": 0.55, "rr": 1.7}

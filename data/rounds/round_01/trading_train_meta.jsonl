@@ -1,0 +1,11 @@
+{"type": "pre_trade", "episode": 3, "symbol": "CANBK", "date": "2015-01-13", "pnl": 195.72, "exit_reason": "SL_HIT", "fund_completeness": "none"}
+{"type": "post_trade", "episode": 3, "symbol": "CANBK", "date": "2015-01-13", "pnl": 195.72, "fund_completeness": "none"}
+{"type": "pre_trade", "episode": 4, "symbol": "CANBK", "date": "2015-01-14", "pnl": -199.92, "exit_reason": "SL_HIT", "fund_completeness": "none"}
+{"type": "post_trade", "episode": 4, "symbol": "CANBK", "date": "2015-01-14", "pnl": -199.92, "fund_completeness": "none"}
+{"type": "pre_trade", "episode": 5, "symbol": "CANBK", "date": "2015-01-15", "pnl": 195.64, "exit_reason": "SL_HIT", "fund_completeness": "none"}
+{"type": "post_trade", "episode": 5, "symbol": "CANBK", "date": "2015-01-15", "pnl": 195.64, "fund_completeness": "none"}
+{"type": "pre_trade", "episode": 6, "symbol": "CANBK", "date": "2015-01-16", "pnl": 200.33, "exit_reason": "SL_HIT", "fund_completeness": "none"}
+{"type": "post_trade", "episode": 6, "symbol": "CANBK", "date": "2015-01-16", "pnl": 200.33, "fund_completeness": "none"}
+{"type": "pre_trade", "episode": 7, "symbol": "CANBK", "date": "2015-01-19", "pnl": 192.29, "exit_reason": "SL_HIT", "fund_completeness": "none"}
+{"type": "post_trade", "episode": 7, "symbol": "CANBK", "date": "2015-01-19", "pnl": 192.29, "fund_completeness": "none"}
+{"type": "pre_trade", "episode": 8, "symbol": "CANBK", "date": "2015-01-20", "pnl": -206.8, "exit_reason": "SL_HIT", "fund_completeness": "none"}

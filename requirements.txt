@@ -1,0 +1,47 @@
+# requirements.txt
+# ─────────────────
+# Install all at once:  pip install -r requirements.txt
+#
+# Stack: PyTorch + HuggingFace PEFT LoRA + trl SFTTrainer + MLflow
+# Hardware: Apple Silicon (MPS) — no bitsandbytes, no mlx-lm
+#           Works on NVIDIA too (CUDA auto-detected by PyTorch)
+
+# ── Core data + charting ──────────────────────────────────────────────────────
+yfinance>=0.2.36
+pandas>=2.0
+numpy>=1.24
+matplotlib>=3.7
+requests>=2.31
+ipywidgets>=8.0
+jupyter>=1.0
+
+# ── PyTorch (MPS on Apple Silicon, CUDA on NVIDIA, CPU fallback) ─────────────
+# Install separately via: pip install torch  (pytorch.org picks right wheel)
+torch>=2.1
+
+# ── HuggingFace training stack ────────────────────────────────────────────────
+transformers>=4.40,<5.0
+datasets>=2.18
+tokenizers>=0.19
+peft>=0.10          # LoRA / QLoRA
+trl>=0.8            # SFTTrainer
+accelerate>=0.28    # multi-device + MPS optimisations
+
+# ── MLflow experiment tracking ────────────────────────────────────────────────
+mlflow>=2.10,<3.0
+
+# ── Local serving (serve.py) ─────────────────────────────────────────────────
+fastapi>=0.111
+uvicorn>=0.29
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+nest_asyncio>=1.6
+PyYAML>=6.0
+python-dotenv>=1.0
+
+# ── NOT included (incompatible with MPS / not needed) ────────────────────────
+# bitsandbytes   — CUDA only (4-bit/8-bit quant)
+# mlx-lm         — Apple Silicon only; replaced by HF stack
+# vllm           — NVIDIA production serving
+# flash-attn     — NVIDIA Ampere+ only
+# unsloth        — CUDA only wrapper

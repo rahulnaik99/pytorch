@@ -1,0 +1,25 @@
+{
+  "model_quality": {
+    "n": 7,
+    "n_decision": 7,
+    "json_validity": 0.0,
+    "reasoning_ok": 0.0,
+    "features_used_ok": 0.0,
+    "schema_ok": 0.0,
+    "action_match": 0.0
+  },
+  "trading_metrics": {
+    "n": 7,
+    "win_rate": 85.7,
+    "avg_win": 43.37,
+    "avg_loss": -13.1,
+    "expectancy": 35.3,
+    "profit_factor": 19.86,
+    "sharpe_per_trade": 1.69,
+    "sortino_per_trade": 7.13,
+    "t_stat": 4.47,
+    "significant_95": true,
+    "total_pnl": 247.1,
+    "max_drawdown": -13.1
+  }
+}

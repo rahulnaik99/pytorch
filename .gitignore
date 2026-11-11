@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Pipeline outputs (regenerable)
+output/state/
+output/metrics/
+output/logs/
+output/trained_examples.json
+mlruns/
+mlflow.db
+data/rounds/merged_train.jsonl
+data/shards/
+docs/generated/
+.dvc/
+
+# OS / editor
+.DS_Store
+.env
