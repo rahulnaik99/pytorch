@@ -33,6 +33,7 @@ Ground every decision in the features given — never invent data.
 Output ONLY valid JSON:
 {
   "action": "BUY" | "SELL" | "HOLD",
+  "planned_entry": <float — limit price to wait for; equals current price for immediate entry>,
   "stop_loss": <float>,
   "take_profit": <float>,
   "risk_reward": <float>,
@@ -134,22 +135,35 @@ def build_example(trade: dict) -> dict:
         features_used = ["ema_stack", "above_vwap", "nearest_support"]
 
     assistant_json = json.dumps({
-        "action":       trade["action"],
-        "stop_loss":    sl,
-        "take_profit":  tp,
-        "risk_reward":  rr,
-        "reasoning":    trade.get("reasoning", "—"),
-        "confidence":   confidence,
+        "action":        trade["action"],
+        "planned_entry": round(float(trade.get("planned_entry") or trade["entry_price"]), 2),
+        "stop_loss":     sl,
+        "take_profit":   tp,
+        "risk_reward":   rr,
+        "reasoning":     trade.get("reasoning", "—"),
+        "confidence":    confidence,
         "features_used": features_used,
-        "key_risk":     f"SL at {sl:.2f} if trend reverses",
+        "key_risk":      f"SL at {sl:.2f} if trend reverses",
     }, indent=2)
 
+    post_rsn = trade.get("post_reasoning")
+    messages = [
+        {"role": "system",    "content": SYSTEM_PROMPT},
+        {"role": "user",      "content": user_prompt},
+        {"role": "assistant", "content": assistant_json},
+    ]
+    if post_rsn:
+        exit_reason = trade.get("exit_reason", "")
+        exit_price  = trade.get("exit_price", 0) or 0
+        pnl         = trade.get("pnl", 0) or 0
+        messages.append({
+            "role": "user",
+            "content": f"Outcome: {exit_reason} @ {exit_price:.2f} ({pnl:+.0f}). Why?",
+        })
+        messages.append({"role": "assistant", "content": post_rsn})
+
     return {
-        "messages": [
-            {"role": "system",    "content": SYSTEM_PROMPT},
-            {"role": "user",      "content": user_prompt},
-            {"role": "assistant", "content": assistant_json},
-        ],
+        "messages": messages,
         "_meta": {
             "symbol":       trade["symbol"],
             "date":         trade["decision_date"],
@@ -166,7 +180,8 @@ def build_example(trade: dict) -> dict:
 
 def quality_filter(example: dict, min_confidence: float, min_rr: float) -> bool:
     try:
-        d = json.loads(example["messages"][-1]["content"])
+        # First assistant turn is always messages[2]; last may be post_reasoning text
+        d = json.loads(example["messages"][2]["content"])
     except Exception:
         return False
     if d.get("action") == "HOLD":
@@ -182,7 +197,7 @@ def quality_filter(example: dict, min_confidence: float, min_rr: float) -> bool:
 
 def _dedup_key(example: dict) -> str:
     try:
-        txt = example["messages"][-1]["content"]
+        txt = example["messages"][2]["content"]   # first assistant turn (trade JSON)
     except Exception:
         txt = json.dumps(example)
     return hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:20]
@@ -190,7 +205,7 @@ def _dedup_key(example: dict) -> str:
 
 def _action(example: dict) -> str:
     try:
-        return json.loads(example["messages"][-1]["content"]).get("action", "")
+        return json.loads(example["messages"][2]["content"]).get("action", "")
     except Exception:
         return ""
 

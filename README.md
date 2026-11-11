@@ -89,6 +89,11 @@ END_DATE=2024-12-31
 LOOKBACK_DAYS=90                      # candle lookback
 OLLAMA_MODEL=hf.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-E4B-4GB:Q4_K_M
 DATA_SOURCE=csv                       # "csv" or "yfinance"
+WORKERS=4                             # parallel candle loading
+
+# Realistic trade mechanics
+POST_REASONING=1                      # second LLM call to explain outcome (default 0)
+BACKFILL_REASONING=1                  # re-run on existing rows to fill post_reasoning
 
 # Training
 BASE_MODEL=nvidia/Nemotron-Mini-4B-Instruct

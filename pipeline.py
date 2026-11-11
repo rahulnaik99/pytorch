@@ -45,6 +45,8 @@ LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", 90))
 MAX_HOLD_DAYS = int(os.environ.get("MAX_HOLD_DAYS",  5))
 COUNT         = int(os.environ.get("COUNT",          10))   # random dates to generate
 WORKERS       = int(os.environ.get("WORKERS",         1))    # parallel workers
+POST_REASONING    = os.environ.get("POST_REASONING",    "0").strip().lower() in ("1","true","yes","on")
+BACKFILL_REASONING = os.environ.get("BACKFILL_REASONING","0").strip().lower() in ("1","true","yes","on")
 OLLAMA_URL    = os.environ.get("OLLAMA_URL",    "http://localhost:11434/api/chat")
 OLLAMA_MODEL  = os.environ.get("OLLAMA_MODEL",  "nemotron-bolt-e4b-16k")
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", 300))  # seconds; Nemotron needs ~170s on CPU
@@ -76,45 +78,96 @@ def init_db() -> None:
     with sqlite3.connect(DB_PATH) as con:
         con.execute("PRAGMA journal_mode=WAL")
         con.execute("PRAGMA busy_timeout=30000")
-        # If existing table is missing required columns, rename and start fresh
         cols = {r[1] for r in con.execute("PRAGMA table_info(trade_log)")}
+
         if cols and not _REQUIRED_COLS.issubset(cols):
             con.execute("ALTER TABLE trade_log RENAME TO trade_log_old")
             print("  Migrated old trade_log → trade_log_old")
-        con.executescript("""
-            CREATE TABLE IF NOT EXISTS trade_log (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol          TEXT,
-                decision_date   TEXT,
-                action          TEXT,
-                entry_price     REAL,
-                stop_loss       REAL,
-                take_profit     REAL,
-                exit_price      REAL,
-                exit_date       TEXT,
-                exit_reason     TEXT,
-                pnl             REAL,
-                reasoning       TEXT,
-                confidence      REAL,
-                features_used   TEXT,
-                technicals_json TEXT,
-                prompt_text     TEXT,
-                created_at      TEXT,
-                UNIQUE(symbol, decision_date)
-            );
-        """)
-        # Add prompt_text to existing DBs that predate this column
-        cols = {r[1] for r in con.execute("PRAGMA table_info(trade_log)")}
-        if "prompt_text" not in cols:
-            con.execute("ALTER TABLE trade_log ADD COLUMN prompt_text TEXT")
+            cols = set()
+
+        if not cols:
+            # Fresh table with full schema
+            con.executescript("""
+                CREATE TABLE IF NOT EXISTS trade_log (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol          TEXT,
+                    decision_date   TEXT,
+                    action          TEXT,
+                    entry_price     REAL,
+                    stop_loss       REAL,
+                    take_profit     REAL,
+                    exit_price      REAL,
+                    exit_date       TEXT,
+                    exit_reason     TEXT,
+                    pnl             REAL,
+                    reasoning       TEXT,
+                    confidence      REAL,
+                    features_used   TEXT,
+                    technicals_json TEXT,
+                    prompt_text     TEXT,
+                    decision_slot   TEXT DEFAULT 'close',
+                    planned_entry   REAL,
+                    post_reasoning  TEXT,
+                    created_at      TEXT,
+                    UNIQUE(symbol, decision_date, decision_slot)
+                );
+            """)
+        elif "decision_slot" not in cols:
+            # Existing table — migrate to new schema with 3-column UNIQUE key
+            print("  Migrating trade_log schema (adding decision_slot, planned_entry, post_reasoning)…")
+            con.executescript("""
+                CREATE TABLE trade_log_new (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol          TEXT,
+                    decision_date   TEXT,
+                    action          TEXT,
+                    entry_price     REAL,
+                    stop_loss       REAL,
+                    take_profit     REAL,
+                    exit_price      REAL,
+                    exit_date       TEXT,
+                    exit_reason     TEXT,
+                    pnl             REAL,
+                    reasoning       TEXT,
+                    confidence      REAL,
+                    features_used   TEXT,
+                    technicals_json TEXT,
+                    prompt_text     TEXT,
+                    decision_slot   TEXT DEFAULT 'close',
+                    planned_entry   REAL,
+                    post_reasoning  TEXT,
+                    created_at      TEXT,
+                    UNIQUE(symbol, decision_date, decision_slot)
+                );
+                INSERT INTO trade_log_new
+                    (id, symbol, decision_date, action, entry_price, stop_loss, take_profit,
+                     exit_price, exit_date, exit_reason, pnl, reasoning, confidence,
+                     features_used, technicals_json, prompt_text, decision_slot,
+                     planned_entry, post_reasoning, created_at)
+                SELECT id, symbol, decision_date, action, entry_price, stop_loss, take_profit,
+                       exit_price, exit_date, exit_reason, pnl, reasoning, confidence,
+                       features_used, technicals_json,
+                       COALESCE(prompt_text, NULL),
+                       'close', NULL, NULL, created_at
+                FROM trade_log;
+                DROP TABLE trade_log;
+                ALTER TABLE trade_log_new RENAME TO trade_log;
+            """)
+            print("  Migration complete — all existing rows set to decision_slot='close'")
+        else:
+            # Table exists with new schema; add any still-missing columns
+            for col, defn in [("planned_entry", "REAL"), ("post_reasoning", "TEXT")]:
+                if col not in cols:
+                    con.execute(f"ALTER TABLE trade_log ADD COLUMN {col} {defn}")
+
     print(f"DB ready: {DB_PATH}")
 
 
-def _already_exists(symbol: str, date: str) -> bool:
+def _already_exists(symbol: str, date: str, slot: str = "close") -> bool:
     with sqlite3.connect(DB_PATH) as con:
         row = con.execute(
-            "SELECT 1 FROM trade_log WHERE symbol=? AND decision_date=? LIMIT 1",
-            (symbol, date)
+            "SELECT 1 FROM trade_log WHERE symbol=? AND decision_date=? AND decision_slot=? LIMIT 1",
+            (symbol, date, slot)
         ).fetchone()
     return row is not None
 
@@ -125,8 +178,10 @@ def _store(row: dict) -> None:
             INSERT OR IGNORE INTO trade_log
               (symbol, decision_date, action, entry_price, stop_loss, take_profit,
                exit_price, exit_date, exit_reason, pnl, reasoning, confidence,
-               features_used, technicals_json, prompt_text, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               features_used, technicals_json, prompt_text,
+               decision_slot, planned_entry, post_reasoning,
+               created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             row["symbol"], row["decision_date"], row["action"],
             row["entry_price"], row["stop_loss"], row["take_profit"],
@@ -135,6 +190,9 @@ def _store(row: dict) -> None:
             json.dumps(row.get("features_used", [])),
             json.dumps(row.get("technicals_json", {})),
             row.get("prompt_text"),
+            row.get("decision_slot", "close"),
+            row.get("planned_entry"),
+            row.get("post_reasoning"),
             datetime.now().isoformat(),
         ))
 
@@ -145,9 +203,10 @@ _SYSTEM = (
     "You are a disciplined NSE equity trader. Protect capital first. "
     "R:R must be >= 1.5. HOLD if setup unclear. "
     "Ground every decision in the features given — never invent data. "
-    "Output JSON with keys: action, stop_loss, take_profit, risk_reward, "
+    "Output JSON with keys: action, planned_entry, stop_loss, take_profit, risk_reward, "
     "reasoning, confidence, features_used. "
-    "action must be BUY, SELL, or HOLD."
+    "action must be BUY, SELL, or HOLD. "
+    "planned_entry is your limit entry price (can equal current price for market entry)."
 )
 
 
@@ -177,6 +236,38 @@ def _llm_generate(user: str) -> str | None:
         return None
 
 
+def _llm_post_reasoning(symbol: str, date: str, action: str,
+                        planned_entry: float, sl: float, tp: float,
+                        exit_reason: str, exit_p: float, pnl: float) -> str | None:
+    """Second LLM call: explain why the trade succeeded or failed."""
+    pnl_str = f"{pnl:+.0f}"
+    post_prompt = (
+        f"Trade outcome for {symbol} {date}:\n"
+        f"Plan: {action} limit entry @ {planned_entry:.2f}, SL={sl:.2f}, TP={tp:.2f}\n"
+        f"Outcome: {exit_reason} @ {exit_p:.2f} (P&L: {pnl_str})\n\n"
+        "In 2-3 sentences: what price action caused this outcome? "
+        "What did the setup get right or wrong? Be specific about levels and structure."
+    )
+    system = "You are a trading analyst. Explain what happened in a trade briefly and precisely."
+    try:
+        if HF_MODEL:
+            from inference import generate_hf
+            return generate_hf(HF_MODEL, system, post_prompt, adapter_path=HF_ADAPTER or None)
+        import requests
+        r = requests.post(OLLAMA_URL, json={
+            "model": OLLAMA_MODEL,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user",   "content": post_prompt}],
+            "stream": False,
+            "options": {"temperature": 0.3, "num_ctx": 2048},
+        }, timeout=OLLAMA_TIMEOUT)
+        r.raise_for_status()
+        return r.json()["message"]["content"].strip()
+    except Exception as e:
+        print(f"  [post_reasoning error: {e}]")
+        return None
+
+
 def _parse_json(text: str | None) -> dict:
     if not text:
         return {}
@@ -202,7 +293,8 @@ def _pct(a, b):
     return round((a - b) / b * 100, 2)
 
 
-def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> str:
+def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
+                 decision_slot: str = "close") -> str:
     close = tech.get("close", 0)
     rc    = tech.get("recent_candles", [])
     prev_close = rc[-2]["close"] if len(rc) >= 2 else close
@@ -241,10 +333,24 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> str:
     ns = tech.get("nearest_support");  dist_s = _pct(ns["mid"], close) if ns and close else None
     nr = tech.get("nearest_resistance"); dist_r = _pct(nr["mid"], close) if nr and close else None
 
-    sh = tech.get("swing_highs", [])[-2:]
-    sl = tech.get("swing_lows",  [])[-2:]
-    sh_str = "  ".join(f"{s['price']:.1f}({s['date'][5:]})" for s in sh) or "—"
-    sl_str = "  ".join(f"{s['price']:.1f}({s['date'][5:]})" for s in sl) or "—"
+    sh90 = tech.get("swing_highs", [])
+    sl90 = tech.get("swing_lows",  [])
+    sh30 = tech.get("swing_highs_30d", [])
+    sl30 = tech.get("swing_lows_30d",  [])
+    sh90_str = "  ".join(f"{s['price']:.1f}({s['date'][5:]})" for s in sh90[-6:]) or "—"
+    sl90_str = "  ".join(f"{s['price']:.1f}({s['date'][5:]})" for s in sl90[-6:]) or "—"
+    sh30_str = "  ".join(f"{s['price']:.1f}({s['date'][5:]})" for s in sh30[-6:]) or "—"
+    sl30_str = "  ".join(f"{s['price']:.1f}({s['date'][5:]})" for s in sl30[-6:]) or "—"
+
+    va = tech.get("volume_analysis", {})
+    vol_trend_line = ""
+    if va:
+        avg5  = va.get("avg_5d",  0)
+        avg20 = va.get("avg_20d", 0)
+        ratio = va.get("ratio",   1.0)
+        sentiment = va.get("sentiment", "")
+        vol_trend_line = (f"VOL_TREND: 5d:{avg5/1e6:.1f}M 20d:{avg20/1e6:.1f}M "
+                          f"({ratio:.2f}x) | {sentiment}\n")
 
     bias = ("bullish" if (stack or "").startswith("bullish") and (c_vs_vwap or 0) > 0 else
             "bearish" if (stack or "").startswith("bearish") and (c_vs_vwap or 0) < 0 else "neutral")
@@ -279,8 +385,16 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> str:
 
     vix_line = ""
     if vc:
+        rt = vc.get("regime_trading", "")
+        t10 = vc.get("trend_10d", "")
+        qb  = vc.get("quantity_bias", "")
         vix_line = (f"VIX:{vc.get('vix')} | {vc.get('pctile_1y')}pct(1y) | "
-                    f"{vc.get('regime')} | 5d:{vc.get('dir_5d')} | 20dRange:{vc.get('pos_20d')}\n")
+                    f"{vc.get('regime')}"
+                    f"{f' | {rt}' if rt else ''} | "
+                    f"5d:{vc.get('dir_5d')}"
+                    f"{f' 10d:{t10}' if t10 else ''} | "
+                    f"20dRange:{vc.get('pos_20d')}"
+                    f"{f' | size:{qb}' if qb else ''}\n")
 
     zones_line = ""
     if zc:
@@ -295,14 +409,28 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> str:
         if cf: zparts.append("CONFLUENCE:" + "+".join(cf))
         zones_line = "ZONES:\n  " + "\n  ".join(zparts) + "\n"
 
+    rl = tech.get("round_levels", [])
+    round_line = ""
+    if rl:
+        def fmt_rl(r):
+            t = "M" if r.get("type") == "major" else "m"
+            return f"{r['level']}({t},{r['dist_pct']:+.1f}%)"
+        sup_rounds = [r for r in rl if r.get("side") == "support"][-2:]
+        res_rounds = [r for r in rl if r.get("side") == "resistance"][:2]
+        all_rounds = sup_rounds + res_rounds
+        if all_rounds:
+            round_line = "ROUND: " + "  ".join(fmt_rl(r) for r in
+                         sorted(all_rounds, key=lambda r: abs(r["dist_pct"]))) + "\n"
+
     return (
-        f"[{symbol} {date}]\n"
+        f"[{symbol} {date} @{decision_slot}]\n"
         f"HEADLINE: {' | '.join(headline_bits)}\n"
         f"C:{close} ({'+' if (day_chg or 0)>=0 else ''}{day_chg}%) | "
         f"5d:{d5_low}-{d5_high} C@{pct_pos}pct\n"
         f"ATR:{atr} | Vol:{last_vol/1e6:.1f}M({vol_ratio}x avg) | "
-        f"3d:{'+' if (d3_chg or 0)>=0 else ''}{d3_chg if d3_chg is not None else 0}%\n\n"
-        f"EMA: 50@{e50} {'<' if (e50 or 0)<(e100 or 0) else '>'} "
+        f"3d:{'+' if (d3_chg or 0)>=0 else ''}{d3_chg if d3_chg is not None else 0}%\n"
+        f"{vol_trend_line}"
+        f"\nEMA: 50@{e50} {'<' if (e50 or 0)<(e100 or 0) else '>'} "
         f"100@{e100} {'<' if (e100 or 0)<(e200 or 0) else '>'} "
         f"200@{e200} [{stack.split()[0].upper()}]\n"
         f"VWAP:{vwap} C{'+' if (c_vs_vwap or 0)>=0 else ''}{c_vs_vwap}% | "
@@ -311,7 +439,9 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> str:
         f"Struct:{','.join(tech.get('structure',[]) or ['-'])}\n\n"
         f"S:{sup_str}  (nearest {(dist_s or 0):+.1f}%)\n"
         f"R:{res_str}  (nearest {'+' if (dist_r or 0)>=0 else ''}{dist_r or 0}%)\n"
-        f"SH:{sh_str} | SL:{sl_str}\n"
+        f"{round_line}"
+        f"SWH/L-90d: H:{sh90_str}  L:{sl90_str}\n"
+        f"SWH/L-30d: H:{sh30_str}  L:{sl30_str}\n"
         f"{levels_line}"
         f"{vix_line}"
         f"{zones_line}"
@@ -328,9 +458,10 @@ def _safe_num(x, default=0.0):
         return default
 
 
-def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> tuple[dict, str]:
+def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
+           decision_slot: str = "close") -> tuple[dict, str]:
     """Returns (decision_dict, prompt_text) so the caller can store the exact prompt."""
-    user = build_prompt(symbol, date, tech, vc, zc)
+    user = build_prompt(symbol, date, tech, vc, zc, decision_slot)
     dec  = _parse_json(_llm_generate(user))
     if dec.get("action") in ("BUY", "SELL", "HOLD"):
         return dec, user
@@ -369,10 +500,39 @@ def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict) -> tuple[dict
 # ── Outcome simulation ────────────────────────────────────────────────
 
 def simulate_outcome(action: str, entry: float, sl: float, tp: float,
-                     fwd_df, max_hold: int = MAX_HOLD_DAYS):
+                     fwd_df, max_hold: int = MAX_HOLD_DAYS,
+                     planned_entry: float | None = None):
+    """Simulate trade outcome.
+
+    If planned_entry is set and differs from entry (limit order), Phase 1 checks
+    if the fill level is reached before proceeding. Phase 2 tracks SL/TP from
+    the fill bar onward.
+
+    Returns: (exit_reason, exit_price, exit_date, bars_held)
+    exit_reason can be 'ENTRY_NOT_FILLED' when a limit entry never triggers.
+    """
     if action == "HOLD" or not sl or not tp or fwd_df.empty:
         return "HOLD", entry, None, 0
-    for i, (idx, row) in enumerate(fwd_df.head(max_hold).iterrows()):
+
+    bars = list(fwd_df.head(max_hold).iterrows())
+    fill_price = entry   # default: immediate market fill
+
+    # Phase 1 — wait for limit fill (only when planned_entry differs from current price)
+    if planned_entry and abs(planned_entry - entry) > 0.01:
+        filled = False
+        for i, (idx, row) in enumerate(bars):
+            lo, hi = float(row["low"]), float(row["high"])
+            if action == "BUY"  and lo <= planned_entry:
+                fill_price = planned_entry; bars = bars[i:]; filled = True; break
+            if action == "SELL" and hi >= planned_entry:
+                fill_price = planned_entry; bars = bars[i:]; filled = True; break
+        if not filled:
+            last = fwd_df.head(max_hold).iloc[-1]
+            return "ENTRY_NOT_FILLED", round(float(last["close"]), 2), \
+                   str(fwd_df.head(max_hold).index[-1].date()), max_hold
+
+    # Phase 2 — track SL/TP from fill bar onward
+    for i, (idx, row) in enumerate(bars):
         lo, hi = float(row["low"]), float(row["high"])
         ds = str(idx.date())
         if action == "BUY":
@@ -381,6 +541,7 @@ def simulate_outcome(action: str, entry: float, sl: float, tp: float,
         elif action == "SELL":
             if hi >= sl: return "SL_HIT", round(sl, 2), ds, i + 1
             if lo <= tp: return "TP_HIT", round(tp, 2), ds, i + 1
+
     last = fwd_df.head(max_hold).iloc[-1]
     return "TIME_EXIT", round(float(last["close"]), 2), str(fwd_df.head(max_hold).index[-1].date()), max_hold
 
@@ -407,10 +568,15 @@ def trade_costs(entry: float, exit_p: float, qty: int, action: str) -> float:
 
 # ── Core: one sample per date ─────────────────────────────────────────
 
-def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str) -> dict | None:
+def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
+                    slot: str | None = None) -> dict | None:
+    # Determine slot (random if not specified)
+    if slot is None:
+        slot = random.choice(["open", "mid", "close"])
+
     # 1. Dedup check
-    if _already_exists(symbol, date):
-        print(f"  [skip] {symbol} {date} already in DB")
+    if _already_exists(symbol, date, slot):
+        print(f"  [skip] {symbol} {date} @{slot} already in DB")
         return None
 
     # 2. Load candles
@@ -420,9 +586,9 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str) -> dict | No
         print(f"  [skip] {symbol} {date} — candles: {e}")
         return None
 
-    # 3. Compute technicals, VIX, zones
+    # 3. Compute technicals for the chosen slot, VIX, zones
     try:
-        tech = ta.compute(df)
+        tech = ta.compute(df, decision_slot=slot)
     except Exception as e:
         print(f"  [skip] {symbol} {date} — technicals: {e}")
         return None
@@ -433,8 +599,8 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str) -> dict | No
     if zc:
         tech["zones"] = zc
 
-    # 4. LLM decision (also returns the exact prompt so we can store it)
-    dec, prompt_text = decide(symbol, date, tech, vc, zc)
+    # 4. LLM decision (returns exact prompt stored in DB for training alignment)
+    dec, prompt_text = decide(symbol, date, tech, vc, zc, decision_slot=slot)
     action  = dec.get("action", "HOLD")
     if action not in ("BUY", "SELL", "HOLD"):
         action = "HOLD"
@@ -444,23 +610,37 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str) -> dict | No
     conf    = _safe_num(dec.get("confidence", 0.5), 0.5)
     qty     = max(1, int(_safe_num(dec.get("quantity", 1), 1)))
 
-    # 5. Simulate outcome
+    # planned_entry: LLM's limit price, falls back to current close (market order)
+    pe_raw = _safe_num(dec.get("planned_entry", 0))
+    planned_entry = pe_raw if pe_raw > 0 else tech["close"]
+
+    # 5. Simulate outcome (two-phase if planned_entry differs from current close)
     entry_p = tech["close"]
     try:
         fwd = ta.load_forward(symbol, date, MAX_HOLD_DAYS)
     except Exception:
         fwd = __import__("pandas").DataFrame()
-    exit_reason, exit_p, exit_date, _ = simulate_outcome(action, entry_p, sl, tp, fwd)
-    gross = compute_pnl(action, entry_p, exit_p, qty)
-    pnl   = round(gross - trade_costs(entry_p, exit_p, qty, action), 2)
+    exit_reason, exit_p, exit_date, _ = simulate_outcome(
+        action, entry_p, sl, tp, fwd, planned_entry=planned_entry
+    )
+    gross = compute_pnl(action, planned_entry, exit_p, qty)
+    pnl   = round(gross - trade_costs(planned_entry, exit_p, qty, action), 2)
 
     mark = "PROFIT" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
-    print(f"  {symbol} {date} | {action} SL={sl:.2f} TP={tp:.2f} "
+    print(f"  {symbol} {date} @{slot} | {action} entry={planned_entry:.2f} SL={sl:.2f} TP={tp:.2f} "
           f"→ {exit_reason} {exit_p:.2f} [{mark} {pnl:+.0f}]")
+
+    # 6. Optional post-trade reasoning (second LLM call)
+    post_rsn = None
+    if POST_REASONING and action != "HOLD" and exit_reason != "ENTRY_NOT_FILLED":
+        post_rsn = _llm_post_reasoning(
+            symbol, date, action, planned_entry, sl, tp, exit_reason, exit_p, pnl
+        )
 
     return {
         "symbol": symbol, "decision_date": date,
-        "action": action, "entry_price": round(entry_p, 2),
+        "action": action,
+        "entry_price": round(planned_entry, 2),
         "stop_loss": sl, "take_profit": tp,
         "exit_price": exit_p, "exit_date": exit_date,
         "exit_reason": exit_reason, "pnl": pnl,
@@ -468,6 +648,9 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str) -> dict | No
         "features_used": dec.get("features_used", []),
         "technicals_json": {k: v for k, v in tech.items() if k != "_df"},
         "prompt_text": prompt_text,
+        "decision_slot": slot,
+        "planned_entry": round(planned_entry, 2),
+        "post_reasoning": post_rsn,
     }
 
 
@@ -484,25 +667,27 @@ def trading_days(start: str, end: str) -> list[str]:
     return days
 
 
-def random_trading_days(start: str, end: str, count: int, symbol: str) -> list[str]:
+def available_slots(start: str, end: str, count: int, symbol: str) -> list[tuple[str, str]]:
     """
-    Pick up to `count` random weekday dates from [start, end] that are NOT
-    already in the DB for this symbol.  Returns a shuffled list — each call
-    gives a different ordering so repeated runs fill in different gaps.
+    Return up to `count` random (date, slot) pairs from [start, end] that are
+    NOT already in the DB for this symbol.  Each date has 3 slots: open/mid/close.
     """
     all_days = trading_days(start, end)
 
-    # Pre-fetch already-processed dates in one query (avoids N round-trips)
     with sqlite3.connect(DB_PATH) as con:
-        done = {r[0] for r in con.execute(
-            "SELECT decision_date FROM trade_log WHERE symbol=?", (symbol,)
+        done = {(r[0], r[1]) for r in con.execute(
+            "SELECT decision_date, decision_slot FROM trade_log WHERE symbol=?", (symbol,)
         )}
 
-    available = [d for d in all_days if d not in done]
+    all_pairs: list[tuple[str, str]] = [
+        (d, s) for d in all_days for s in ("open", "mid", "close")
+    ]
+    available = [(d, s) for d, s in all_pairs if (d, s) not in done]
     random.shuffle(available)
 
-    skipped = len(all_days) - len(available)
-    print(f"Date pool: {len(all_days)} weekdays | "
+    total_days = len(all_days)
+    skipped    = len(all_pairs) - len(available)
+    print(f"Slot pool: {total_days} weekdays × 3 slots = {len(all_pairs)} | "
           f"{skipped} already in DB | "
           f"{len(available)} available | picking {min(count, len(available))}")
 
@@ -514,23 +699,23 @@ def random_trading_days(start: str, end: str, count: int, symbol: str) -> list[s
 if __name__ == "__main__":
     init_db()
 
-    # Build full work list: (symbol, date) pairs across all symbols
-    work: list[tuple[str, str]] = []
+    # Build full work list: (symbol, date, slot) triples across all symbols
+    work: list[tuple[str, str, str]] = []
     for sym in SYMBOLS:
-        dates = random_trading_days(START_DATE, END_DATE, COUNT, sym)
-        if not dates:
-            print(f"All dates already generated for {sym}.")
+        slots = available_slots(START_DATE, END_DATE, COUNT, sym)
+        if not slots:
+            print(f"All slots already generated for {sym}.")
         else:
-            print(f"Queuing {len(dates)} dates for {sym}")
-            work.extend((sym, d) for d in dates)
+            print(f"Queuing {len(slots)} (date, slot) pairs for {sym}")
+            work.extend((sym, d, s) for d, s in slots)
 
     if not work:
         print("Nothing to do. Extend START_DATE/END_DATE or add more symbols.")
     elif WORKERS <= 1:
         ta = TechnicalsAnalyzer()
         generated = 0
-        for sym, date in work:
-            row = generate_sample(ta, sym, date)
+        for sym, date, slot in work:
+            row = generate_sample(ta, sym, date, slot)
             if row:
                 _store(row)
                 generated += 1
@@ -538,8 +723,7 @@ if __name__ == "__main__":
     else:
         # NOTE: With a single Ollama instance, LLM calls are still sequential
         # (Ollama queues them). Speedup comes from parallel candle loading,
-        # technicals computation, and outcome simulation — and from running
-        # multiple symbols whose LLM calls can interleave in Ollama's queue.
+        # technicals computation, and outcome simulation.
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         if HF_MODEL:
@@ -549,10 +733,10 @@ if __name__ == "__main__":
                   f"note: single Ollama instance queues LLM calls; "
                   f"speedup from parallel data loading + multi-symbol interleaving")
 
-        def _job(sym_date: tuple[str, str]) -> dict | None:
-            sym, date = sym_date
+        def _job(item: tuple[str, str, str]) -> dict | None:
+            sym, date, slot = item
             ta_local = TechnicalsAnalyzer()   # one per thread — avoids shared state
-            row = generate_sample(ta_local, sym, date)
+            row = generate_sample(ta_local, sym, date, slot)
             if row:
                 _store(row)
             return row
@@ -565,7 +749,7 @@ if __name__ == "__main__":
                     if f.result():
                         generated += 1
                 except Exception as e:
-                    sym, date = futures[f]
-                    print(f"  [error] {sym} {date}: {e}")
+                    sym, date, slot = futures[f]
+                    print(f"  [error] {sym} {date} @{slot}: {e}")
 
         print(f"\nDone. {generated} new samples stored in {DB_PATH}")

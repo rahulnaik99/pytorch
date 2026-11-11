@@ -1,7 +1,3 @@
-{"symbol": "CANBK", "date": "2023-02-06", "action": "BUY", "pnl": 51.8, "exit_reason": "TP_HIT", "confidence": 0.79, "rr": 2.15}
-{"symbol": "CANBK", "date": "2023-02-07", "action": "SELL", "pnl": 45.9, "exit_reason": "TP_HIT", "confidence": 0.64, "rr": 1.93}
-{"symbol": "CANBK", "date": "2023-02-08", "action": "BUY", "pnl": -13.1, "exit_reason": "SL_HIT", "confidence": 0.65, "rr": 1.91}
-{"symbol": "CANBK", "date": "2023-02-15", "action": "BUY", "pnl": 34.9, "exit_reason": "TP_HIT", "confidence": 0.68, "rr": 1.69}
-{"symbol": "CANBK", "date": "2023-02-16", "action": "BUY", "pnl": 36.4, "exit_reason": "TP_HIT", "confidence": 0.66, "rr": 1.7}
-{"symbol": "CANBK", "date": "2023-02-17", "action": "SELL", "pnl": 53.1, "exit_reason": "TP_HIT", "confidence": 0.67, "rr": 2.16}
-{"symbol": "CANBK", "date": "2023-02-20", "action": "SELL", "pnl": 38.1, "exit_reason": "TP_HIT", "confidence": 0.65, "rr": 2.44}
+{"symbol": "CANBK", "date": "2023-01-20", "action": "SELL", "pnl": -7.0, "exit_reason": "TIME_EXIT", "confidence": 0.55, "rr": 2.26}
+{"symbol": "CANBK", "date": "2023-01-23", "action": "SELL", "pnl": 4.4, "exit_reason": "TIME_EXIT", "confidence": 0.66, "rr": 2.12}
+{"symbol": "CANBK", "date": "2023-02-07", "action": "BUY", "pnl": 41.1, "exit_reason": "TP_HIT", "confidence": 0.74, "rr": 2.43}

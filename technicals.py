@@ -170,20 +170,37 @@ class TechnicalsAnalyzer:
 
     # ── Technicals ────────────────────────────────────────────────────
 
-    def compute(self, df: pd.DataFrame) -> dict:
-        """Compute all technical indicators from a daily OHLCV DataFrame."""
+    def compute(self, df: pd.DataFrame, decision_slot: str = "close") -> dict:
+        """Compute all technical indicators from a daily OHLCV DataFrame.
+
+        decision_slot: which intraday price to use as 'current' price —
+            "close" (default), "open", or "mid" ((high+low)/2).
+        """
         close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
-        cur  = float(close.iloc[-1])
+        last = df.iloc[-1]
+        if decision_slot == "open":
+            cur = float(last["open"])
+        elif decision_slot == "mid":
+            cur = (float(last["high"]) + float(last["low"])) / 2
+        else:
+            cur = float(close.iloc[-1])
         e50  = float(close.ewm(span=50,  adjust=False).mean().iloc[-1])
         e100 = float(close.ewm(span=100, adjust=False).mean().iloc[-1])
         e200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
         tp   = (high + low + close) / 3
-        vwap = float((tp * vol).cumsum().iloc[-1] / vol.cumsum().iloc[-1])
+        vwap = float((tp * vol).cumsum().iloc[-1] / max(float(vol.cumsum().iloc[-1]), 1e-9))
 
-        pivots = self._detect_pivots(high) + self._detect_pivots(low)
-        trend, structure = self._classify_structure(pivots)
-        sup = [(l, h, m) for l, h, m in self._cluster_zones(pivots, "low")  if m < cur]
-        res = [(l, h, m) for l, h, m in self._cluster_zones(pivots, "high") if m > cur]
+        # ── Two-TF pivot detection ──────────────────────────────────
+        # Long TF (full df, order=5): only clear major structural pivots
+        pivots_long  = self._detect_pivots(high, order=5) + self._detect_pivots(low, order=5)
+        # Short TF (last 30 bars, order=2): granular recent swings
+        df30 = df.iloc[-30:]
+        pivots_short = (self._detect_pivots(df30["high"], order=2) +
+                        self._detect_pivots(df30["low"],  order=2))
+
+        trend, structure = self._classify_structure(pivots_long)
+        sup = [(l, h, m) for l, h, m in self._cluster_zones(pivots_long, "low")  if m < cur]
+        res = [(l, h, m) for l, h, m in self._cluster_zones(pivots_long, "high") if m > cur]
         ns  = max(sup, key=lambda z: z[2]) if sup else None
         nr  = min(res, key=lambda z: z[2]) if res else None
 
@@ -197,6 +214,30 @@ class TechnicalsAnalyzer:
                   .assign(date=lambda d: d["date"].astype(str)).round(2)
                   .to_dict(orient="records"))
 
+        # ── Volume trend analysis ───────────────────────────────────
+        volume_analysis: dict = {}
+        if len(df) >= 6:
+            avg_5d  = float(vol.iloc[-5:].mean())
+            avg_20d = float(vol.iloc[-20:].mean()) if len(df) >= 20 else avg_5d
+            v_ratio = round(avg_5d / avg_20d, 2) if avg_20d > 0 else 1.0
+            v_trend = "up"   if v_ratio > 1.10 else "down" if v_ratio < 0.90 else "flat"
+            p5_chg  = float(close.iloc[-1]) - float(close.iloc[-6])
+            p_dir   = "up" if p5_chg > 0 else "down"
+            sentiment = {
+                ("up",   "up"):   "bullish_momentum",
+                ("up",   "down"): "exhaustion",
+                ("down", "up"):   "bearish_pressure",
+                ("down", "down"): "potential_base",
+            }.get((p_dir, v_trend), "neutral")
+            volume_analysis = {
+                "avg_5d":       round(avg_5d),
+                "avg_20d":      round(avg_20d),
+                "ratio":        v_ratio,
+                "vol_trend":    v_trend,
+                "price_dir_5d": p_dir,
+                "sentiment":    sentiment,
+            }
+
         return {
             "close": cur,
             "ema_50": round(e50, 2), "ema_100": round(e100, 2), "ema_200": round(e200, 2),
@@ -206,12 +247,20 @@ class TechnicalsAnalyzer:
             "nearest_support": zf(ns), "nearest_resistance": zf(nr),
             "support_zones":    [zf(z) for z in sup[-3:]],
             "resistance_zones": [zf(z) for z in res[:3]],
+            # Long TF (90d, order=5): ALL major pivots — no cap
             "swing_highs": [{"date": str(d.date()), "price": round(p, 2)}
-                            for t, d, p in pivots if t == "high"][-3:],
+                            for t, d, p in pivots_long  if t == "high"],
             "swing_lows":  [{"date": str(d.date()), "price": round(p, 2)}
-                            for t, d, p in pivots if t == "low"][-3:],
-            "levels": self._level_breaks(df, cur),
-            "recent_candles": recent,
+                            for t, d, p in pivots_long  if t == "low"],
+            # Short TF (30d, order=2): granular recent pivots
+            "swing_highs_30d": [{"date": str(d.date()), "price": round(p, 2)}
+                                for t, d, p in pivots_short if t == "high"],
+            "swing_lows_30d":  [{"date": str(d.date()), "price": round(p, 2)}
+                                for t, d, p in pivots_short if t == "low"],
+            "round_levels":    self._round_levels(cur),
+            "volume_analysis": volume_analysis,
+            "levels":          self._level_breaks(df, cur),
+            "recent_candles":  recent,
         }
 
     def _detect_pivots(self, series: pd.Series, order: int = 2):
@@ -223,6 +272,41 @@ class TechnicalsAnalyzer:
             elif series.iloc[i] == win.min():
                 pivots.append(("low", series.index[i], float(series.iloc[i])))
         return pivots
+
+    def _round_levels(self, price: float, window_pct: float = 0.08) -> list[dict]:
+        """Return psychologically significant round-number price levels within ±window_pct.
+
+        Adaptive step size by price magnitude. Each entry:
+            level (float), type ("major"|"minor"), dist_pct (float), side ("support"|"resistance")
+        Sorted by abs(dist_pct), nearest first.
+        """
+        if price <= 0:
+            return []
+        step = (5   if price <   50 else
+                25  if price <  200 else
+                50  if price <  500 else
+                100 if price < 2000 else 250)
+        # A "major" level is a multiple of 4× step (e.g. step=25 → every 100 is major)
+        major_step = step * 4
+        lo = price * (1 - window_pct)
+        hi = price * (1 + window_pct)
+        first_mult = int(lo / step)
+        if first_mult * step < lo:
+            first_mult += 1
+        levels = []
+        mult = first_mult
+        while mult * step <= hi:
+            lvl = mult * step
+            if abs(lvl - price) / price > 0.001:   # skip trivially close levels
+                dist_pct = round((lvl - price) / price * 100, 2)
+                levels.append({
+                    "level":    float(lvl),
+                    "type":     "major" if lvl % major_step == 0 else "minor",
+                    "dist_pct": dist_pct,
+                    "side":     "support" if lvl < price else "resistance",
+                })
+            mult += 1
+        return sorted(levels, key=lambda x: abs(x["dist_pct"]))
 
     def _classify_structure(self, pivots):
         sh = sorted([(d, p) for t, d, p in pivots if t == "high"])
@@ -321,8 +405,19 @@ class TechnicalsAnalyzer:
         regime = ("LOW"      if level < VIX_LOW      else
                   "NORMAL"   if level < VIX_NORMAL   else
                   "ELEVATED" if level < VIX_ELEVATED else "EXTREME")
+        # Trading-intuition regime (user thresholds: <12 consolidation, 12-15 sideways, ≥15 volatile)
+        regime_trading = ("consolidation" if level < 12  else
+                          "volatile"      if level >= 15 else "sideways")
+        chg10 = level - float(s.iloc[-11]) if len(s) >= 11 else 0.0
+        trend_10d = "rising" if chg10 > 0.5 else "falling" if chg10 < -0.5 else "flat"
+        quantity_bias = ("fewer shares, bigger point targets" if level >= 15 else
+                         "more shares, tighter targets"       if level <  12 else
+                         "standard sizing")
         return {"vix": round(level, 2), "pctile_1y": pctile, "regime": regime,
-                "dir_5d": direction, "pos_20d": pos20}
+                "dir_5d": direction, "pos_20d": pos20,
+                "regime_trading": regime_trading,
+                "trend_10d":      trend_10d,
+                "quantity_bias":  quantity_bias}
 
     # ── Demand/supply zones ───────────────────────────────────────────
 
