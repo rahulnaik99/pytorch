@@ -1,3 +1,0 @@
-{"symbol": "CANBK", "date": "2022-11-10", "action": "BUY", "pnl": -0.4, "exit_reason": "TIME_EXIT", "confidence": 0.56, "rr": 2.4}
-{"symbol": "CANBK", "date": "2022-12-08", "action": "SELL", "pnl": -21.3, "exit_reason": "SL_HIT", "confidence": 0.85, "rr": 2.2}
-{"symbol": "CANBK", "date": "2022-12-12", "action": "BUY", "pnl": 40.4, "exit_reason": "TP_HIT", "confidence": 0.71, "rr": 1.86}

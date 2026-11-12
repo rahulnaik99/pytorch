@@ -47,6 +47,7 @@ COUNT         = int(os.environ.get("COUNT",          10))   # random dates to ge
 WORKERS       = int(os.environ.get("WORKERS",         1))    # parallel workers
 POST_REASONING    = os.environ.get("POST_REASONING",    "0").strip().lower() in ("1","true","yes","on")
 BACKFILL_REASONING = os.environ.get("BACKFILL_REASONING","0").strip().lower() in ("1","true","yes","on")
+REQUIRE_LLM       = os.environ.get("REQUIRE_LLM",       "0").strip().lower() in ("1","true","yes","on")
 OLLAMA_URL    = os.environ.get("OLLAMA_URL",    "http://localhost:11434/api/chat")
 OLLAMA_MODEL  = os.environ.get("OLLAMA_MODEL",  "nemotron-bolt-e4b-16k")
 OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", 300))  # seconds; Nemotron needs ~170s on CPU
@@ -69,6 +70,23 @@ SEBI_PCT       = float(os.environ.get("SEBI_PCT",       0.000001))
 GST_PCT        = float(os.environ.get("GST_PCT",        0.18))
 STAMP_PCT      = float(os.environ.get("STAMP_PCT",      0.00015))
 
+
+# ── NSE market holidays (weekday dates with no trading) ──────────────
+NSE_HOLIDAYS: set[str] = {
+    # 2023
+    "2023-01-26", "2023-03-07", "2023-03-30", "2023-04-04", "2023-04-07",
+    "2023-04-14", "2023-05-01", "2023-06-28", "2023-08-15", "2023-09-19",
+    "2023-10-02", "2023-10-24", "2023-11-14", "2023-11-27", "2023-12-25",
+    # 2024
+    "2024-01-22", "2024-01-26", "2024-03-25", "2024-03-29", "2024-04-11",
+    "2024-04-14", "2024-04-17", "2024-04-21", "2024-05-23", "2024-06-17",
+    "2024-07-17", "2024-08-15", "2024-10-02", "2024-10-12", "2024-10-14",
+    "2024-11-01", "2024-11-15", "2024-12-25",
+    # 2025
+    "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10", "2025-04-14",
+    "2025-04-18", "2025-05-01", "2025-08-15", "2025-08-27", "2025-10-02",
+    "2025-10-21", "2025-10-22", "2025-11-05", "2025-12-25",
+}
 
 # ── Database ──────────────────────────────────────────────────────────
 
@@ -108,6 +126,7 @@ def init_db() -> None:
                     decision_slot   TEXT DEFAULT 'close',
                     planned_entry   REAL,
                     post_reasoning  TEXT,
+                    is_mock         INTEGER DEFAULT 0,
                     created_at      TEXT,
                     UNIQUE(symbol, decision_date, decision_slot)
                 );
@@ -156,7 +175,8 @@ def init_db() -> None:
             print("  Migration complete — all existing rows set to decision_slot='close'")
         else:
             # Table exists with new schema; add any still-missing columns
-            for col, defn in [("planned_entry", "REAL"), ("post_reasoning", "TEXT")]:
+            for col, defn in [("planned_entry", "REAL"), ("post_reasoning", "TEXT"),
+                               ("is_mock", "INTEGER DEFAULT 0")]:
                 if col not in cols:
                     con.execute(f"ALTER TABLE trade_log ADD COLUMN {col} {defn}")
 
@@ -180,8 +200,8 @@ def _store(row: dict) -> None:
                exit_price, exit_date, exit_reason, pnl, reasoning, confidence,
                features_used, technicals_json, prompt_text,
                decision_slot, planned_entry, post_reasoning,
-               created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               is_mock, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             row["symbol"], row["decision_date"], row["action"],
             row["entry_price"], row["stop_loss"], row["take_profit"],
@@ -193,6 +213,7 @@ def _store(row: dict) -> None:
             row.get("decision_slot", "close"),
             row.get("planned_entry"),
             row.get("post_reasoning"),
+            0,  # is_mock=0 for all real pipeline rows
             datetime.now().isoformat(),
         ))
 
@@ -458,6 +479,13 @@ def _safe_num(x, default=0.0):
         return default
 
 
+def _validate_trade(action: str, entry: float, sl: float, tp: float) -> bool:
+    """Returns True only when SL/TP are on the correct side of entry."""
+    if action == "BUY":  return sl < entry < tp
+    if action == "SELL": return tp < entry < sl
+    return True  # HOLD always valid
+
+
 def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
            decision_slot: str = "close") -> tuple[dict, str]:
     """Returns (decision_dict, prompt_text) so the caller can store the exact prompt."""
@@ -466,7 +494,11 @@ def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
     if dec.get("action") in ("BUY", "SELL", "HOLD"):
         return dec, user
 
-    # Rule-based fallback
+    # Rule-based fallback — skipped when REQUIRE_LLM=1
+    if REQUIRE_LLM:
+        return {"action": "HOLD", "stop_loss": 0, "take_profit": 0, "risk_reward": 0,
+                "confidence": 0.0, "reasoning": "__llm_failed__",
+                "features_used": []}, user
     ns, nr = tech.get("nearest_support"), tech.get("nearest_resistance")
     cur = tech["close"]
     max_risk = CAPITAL_FOR_QTY * RISK_PER_TRADE
@@ -604,15 +636,24 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     action  = dec.get("action", "HOLD")
     if action not in ("BUY", "SELL", "HOLD"):
         action = "HOLD"
+    rsn = dec.get("reasoning", "—")
+    if rsn == "__llm_failed__":
+        print(f"  [skip] {symbol} {date} @{slot}: LLM failed, REQUIRE_LLM=1")
+        return None
     sl      = _safe_num(dec.get("stop_loss",  0))
     tp      = _safe_num(dec.get("take_profit", 0))
-    rsn     = dec.get("reasoning", "—")
     conf    = _safe_num(dec.get("confidence", 0.5), 0.5)
     qty     = max(1, int(_safe_num(dec.get("quantity", 1), 1)))
 
     # planned_entry: LLM's limit price, falls back to current close (market order)
     pe_raw = _safe_num(dec.get("planned_entry", 0))
     planned_entry = pe_raw if pe_raw > 0 else tech["close"]
+
+    # Validate SL/TP are on the correct side of entry
+    if action in ("BUY", "SELL") and not _validate_trade(action, planned_entry, sl, tp):
+        print(f"  [skip] {symbol} {date} @{slot}: invalid SL/TP sides "
+              f"({action} entry={planned_entry:.2f} SL={sl:.2f} TP={tp:.2f})")
+        return None
 
     # 5. Simulate outcome (two-phase if planned_entry differs from current close)
     entry_p = tech["close"]
@@ -623,8 +664,12 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     exit_reason, exit_p, exit_date, _ = simulate_outcome(
         action, entry_p, sl, tp, fwd, planned_entry=planned_entry
     )
-    gross = compute_pnl(action, planned_entry, exit_p, qty)
-    pnl   = round(gross - trade_costs(planned_entry, exit_p, qty, action), 2)
+    if exit_reason == "ENTRY_NOT_FILLED":
+        gross = 0.0
+        pnl   = 0.0
+    else:
+        gross = compute_pnl(action, planned_entry, exit_p, qty)
+        pnl   = round(gross - trade_costs(planned_entry, exit_p, qty, action), 2)
 
     mark = "PROFIT" if pnl > 0 else "LOSS" if pnl < 0 else "FLAT"
     print(f"  {symbol} {date} @{slot} | {action} entry={planned_entry:.2f} SL={sl:.2f} TP={tp:.2f} "
@@ -657,12 +702,13 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
 # ── Date utilities ────────────────────────────────────────────────────
 
 def trading_days(start: str, end: str) -> list[str]:
-    """All weekday (Mon-Fri) dates between start and end inclusive."""
+    """All weekday (Mon-Fri) dates between start and end inclusive, excluding NSE holidays."""
     days, dt = [], datetime.strptime(start, "%Y-%m-%d")
     end_dt = datetime.strptime(end, "%Y-%m-%d")
     while dt <= end_dt:
-        if dt.weekday() < 5:
-            days.append(dt.strftime("%Y-%m-%d"))
+        d = dt.strftime("%Y-%m-%d")
+        if dt.weekday() < 5 and d not in NSE_HOLIDAYS:
+            days.append(d)
         dt += timedelta(days=1)
     return days
 

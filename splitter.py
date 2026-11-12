@@ -53,6 +53,7 @@ def load_trades(db_path: str) -> list[dict]:
             SELECT * FROM trade_log
             WHERE action != 'HOLD'
               AND reasoning IS NOT NULL
+              AND (is_mock = 0 OR is_mock IS NULL)
             ORDER BY decision_date, id
         """).fetchall()
     return [dict(r) for r in rows]

@@ -22,7 +22,7 @@ except ImportError:
     pass
 
 import os
-DB_PATH = os.environ.get("DB_PATH", "trading_agent.db")
+DB_PATH = os.environ.get("DB_PATH", "mock.db")
 
 # ── Make sure DB has the right schema ────────────────────────────────────────
 def _ensure_db():
@@ -48,13 +48,15 @@ def _ensure_db():
                 decision_slot   TEXT DEFAULT 'close',
                 planned_entry   REAL,
                 post_reasoning  TEXT,
+                is_mock         INTEGER DEFAULT 1,
                 created_at      TEXT,
                 UNIQUE(symbol, decision_date, decision_slot)
             );
         """)
         cols = {r[1] for r in con.execute("PRAGMA table_info(trade_log)")}
         for col, defn in [("prompt_text", "TEXT"), ("decision_slot", "TEXT"),
-                          ("planned_entry", "REAL"), ("post_reasoning", "TEXT")]:
+                          ("planned_entry", "REAL"), ("post_reasoning", "TEXT"),
+                          ("is_mock", "INTEGER DEFAULT 1")]:
             if col not in cols:
                 con.execute(f"ALTER TABLE trade_log ADD COLUMN {col} {defn}")
 
@@ -159,16 +161,16 @@ def _make_sample(date: str, symbol: str = "CANBK", slot: str | None = None) -> d
         exit_price = cur; exit_reason = "HOLD"; pnl = 0.0
     elif exit_reason == "TP_HIT":
         exit_price = tp
-        pnl = round((tp - planned_entry if action == "BUY" else planned_entry - tp) * 10, 2)
+        pnl = round(tp - planned_entry if action == "BUY" else planned_entry - tp, 2)
     elif exit_reason == "SL_HIT":
         exit_price = sl
-        pnl = round(-abs(planned_entry - sl) * 10, 2)
+        pnl = round(-(abs(planned_entry - sl)), 2)
     elif exit_reason == "ENTRY_NOT_FILLED":
-        exit_price = cur; pnl = 0.0
+        exit_price = planned_entry; pnl = 0.0
     else:
         drift = rng.uniform(-0.01, 0.015)
         exit_price = round(cur * (1 + drift), 2)
-        pnl = round((exit_price - planned_entry if action == "BUY" else planned_entry - exit_price) * 10, 2)
+        pnl = round(exit_price - planned_entry if action == "BUY" else planned_entry - exit_price, 2)
 
     # Optional mock post_reasoning (50% of non-HOLD, non-ENTRY_NOT_FILLED rows)
     post_rsn = None
@@ -341,8 +343,8 @@ def insert_mock(count: int = 60, clear_mock: bool = False):
                        exit_price, exit_date, exit_reason, pnl, reasoning, confidence,
                        features_used, technicals_json, prompt_text,
                        decision_slot, planned_entry, post_reasoning,
-                       created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       is_mock, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     row["symbol"], row["decision_date"], row["action"],
                     row["entry_price"], row["stop_loss"], row["take_profit"],
@@ -351,6 +353,7 @@ def insert_mock(count: int = 60, clear_mock: bool = False):
                     row["features_used"], row["technicals_json"],
                     row["prompt_text"],
                     row["decision_slot"], row["planned_entry"], row["post_reasoning"],
+                    1,  # is_mock=1
                     row["created_at"],
                 ))
                 inserted += 1
