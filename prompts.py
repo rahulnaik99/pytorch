@@ -66,7 +66,11 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
                 parts.append(f"{z['low']:.1f}-{z['high']:.1f}({d:+.1f}%)")
         return "  ".join(parts) or "—"
 
-    sup_str = fmt_zones(tech.get("support_zones"))
+    # Support zones: ordered low→high in DB, so [:2] gives FARTHEST zones.
+    # Reverse so the LLM sees nearest first — it consistently cites the first
+    # listed zone as "nearest support", which was wrong before this fix.
+    sup_str = fmt_zones(list(reversed(tech.get("support_zones") or [])))
+    # Resistance zones: already ordered low→high = nearest first.
     res_str = fmt_zones(tech.get("resistance_zones"))
     ns = tech.get("nearest_support");  dist_s = _pct(ns["mid"], close) if ns and close else None
     nr = tech.get("nearest_resistance"); dist_r = _pct(nr["mid"], close) if nr and close else None

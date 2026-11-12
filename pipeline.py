@@ -547,6 +547,19 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
                 print(f"  [warn] {symbol} {date} @{slot}: SL very tight "
                       f"(dist={sl_dist:.2f}, 30%ATR={0.3 * avg_range:.2f})")
 
+    # Warn when the LLM's stated R:R doesn't match the actual sl/tp numbers — arithmetic errors
+    # result in wrong HOLDs (model says R:R < 1.5 but actual calculation passes)
+    if action in ("BUY", "SELL") and sl and tp:
+        actual_rr = round(abs(planned_entry - tp) / max(abs(planned_entry - sl), 0.01), 2)
+        stated_rr = _safe_num(dec.get("risk_reward", 0))
+        if stated_rr > 0 and abs(actual_rr - stated_rr) > stated_rr * 0.25:
+            print(f"  [warn] {symbol} {date} @{slot}: R:R mismatch "
+                  f"stated={stated_rr} actual={actual_rr}")
+
+    # Warn when a non-HOLD trade lacks a key_risk — incomplete training signal
+    if action != "HOLD" and not key_risk:
+        print(f"  [warn] {symbol} {date} @{slot}: {action} trade has empty key_risk")
+
     # 5. Simulate outcome (two-phase if planned_entry differs from current close)
     entry_p = tech["close"]
     try:
