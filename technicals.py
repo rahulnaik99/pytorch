@@ -289,7 +289,7 @@ class TechnicalsAnalyzer:
             }
 
         return {
-            "close": cur,
+            "close": round(cur, 2),
             "ema_50": round(e50, 2), "ema_100": round(e100, 2), "ema_200": round(e200, 2),
             "vwap": round(vwap, 2),
             "ema_stack": stack, "above_vwap": cur > vwap, "above_ema200": cur > e200,

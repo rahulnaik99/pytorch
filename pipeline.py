@@ -522,6 +522,11 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     qty     = max(1, int(_safe_num(dec.get("quantity", 1), 1)))
     key_risk = dec.get("key_risk", "") or ""
 
+    # HOLD means no trade — SL/TP from the LLM are discarded
+    if action == "HOLD":
+        sl = 0.0
+        tp = 0.0
+
     # planned_entry: LLM's limit price, falls back to current close (market order)
     pe_raw = _safe_num(dec.get("planned_entry", 0))
     planned_entry = pe_raw if pe_raw > 0 else tech["close"]
@@ -563,8 +568,11 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         "symbol": symbol, "decision_date": date,
         "action": action,
         "entry_price": round(planned_entry, 2),
-        "stop_loss": sl, "take_profit": tp,
-        "exit_price": exit_p, "exit_date": exit_date,
+        "stop_loss":   round(sl, 2),
+        "take_profit": round(tp, 2),
+        # For HOLD no trade executes — exit_price = entry_price (no rounding mismatch)
+        "exit_price":  round(planned_entry if action == "HOLD" else exit_p, 2),
+        "exit_date":   exit_date,
         "exit_reason": exit_reason, "pnl": pnl,
         "reasoning": rsn, "confidence": conf,
         "features_used": dec.get("features_used", []),
