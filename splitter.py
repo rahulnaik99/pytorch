@@ -26,28 +26,19 @@ try:
 except ImportError:
     pass
 
-SYSTEM_PROMPT = """You are a disciplined NSE equity trader. Protect capital first.
-R:R must be >= 1.5. HOLD if setup unclear.
-Ground every decision in the features given — never invent data.
+from prompts import SYSTEM_PROMPT
 
-Output ONLY valid JSON:
-{
-  "action": "BUY" | "SELL" | "HOLD",
-  "planned_entry": <float — limit price to wait for; equals current price for immediate entry>,
-  "stop_loss": <float>,
-  "take_profit": <float>,
-  "risk_reward": <float>,
-  "reasoning": "<2-3 sentences citing specific prices and indicator values>",
-  "confidence": <0.0-1.0>,
-  "features_used": ["ema_stack", "vwap", "nearest_support"],
-  "key_risk": "<one-line failure scenario>"
-}"""
+
+def _db(db_path: str) -> sqlite3.Connection:
+    con = sqlite3.connect(db_path, timeout=30)
+    con.execute("PRAGMA busy_timeout=30000")
+    return con
 
 
 # ── Load ──────────────────────────────────────────────────────────────
 
 def load_trades(db_path: str) -> list[dict]:
-    with sqlite3.connect(db_path) as con:
+    with _db(db_path) as con:
         con.row_factory = sqlite3.Row
         rows = con.execute("""
             SELECT * FROM trade_log
@@ -125,17 +116,19 @@ def build_example(trade: dict) -> dict:
         except Exception:
             confidence = 0.7
 
+    # Build the assistant response from what the LLM actually produced.
+    # features_used and key_risk come from the LLM's stored reasoning — do not fabricate.
     features_used = _tech_field(trade, "features_used", None)
     if not isinstance(features_used, list) or not features_used:
         raw = trade.get("features_used")
         try:
-            features_used = json.loads(raw) if raw else []
+            features_used = json.loads(raw) if raw else None
         except Exception:
-            features_used = []
-    if not features_used:
-        features_used = ["ema_stack", "above_vwap", "nearest_support"]
+            features_used = None
 
-    assistant_json = json.dumps({
+    key_risk = _tech_field(trade, "key_risk", None)
+
+    assistant_payload: dict = {
         "action":        trade["action"],
         "planned_entry": round(float(trade.get("planned_entry") or trade["entry_price"]), 2),
         "stop_loss":     sl,
@@ -143,9 +136,13 @@ def build_example(trade: dict) -> dict:
         "risk_reward":   rr,
         "reasoning":     trade.get("reasoning", "—"),
         "confidence":    confidence,
-        "features_used": features_used,
-        "key_risk":      f"SL at {sl:.2f} if trend reverses",
-    }, indent=2)
+    }
+    if features_used:
+        assistant_payload["features_used"] = features_used
+    if key_risk:
+        assistant_payload["key_risk"] = key_risk
+
+    assistant_json = json.dumps(assistant_payload, indent=2)
 
     post_rsn = trade.get("post_reasoning")
     messages = [
@@ -169,6 +166,8 @@ def build_example(trade: dict) -> dict:
             "symbol":       trade["symbol"],
             "date":         trade["decision_date"],
             "action":       trade["action"],
+            "sl":           sl,
+            "tp":           tp,
             "pnl":          trade["pnl"],
             "exit_reason":  trade["exit_reason"],
             "confidence":   confidence,
@@ -180,6 +179,10 @@ def build_example(trade: dict) -> dict:
 # ── Quality filter ────────────────────────────────────────────────────
 
 def quality_filter(example: dict, min_confidence: float, min_rr: float) -> bool:
+    meta = example.get("_meta", {})
+    # Exclude ENTRY_NOT_FILLED — no trade happened, nothing to learn from outcome
+    if meta.get("exit_reason") == "ENTRY_NOT_FILLED":
+        return False
     try:
         # First assistant turn is always messages[2]; last may be post_reasoning text
         d = json.loads(example["messages"][2]["content"])
@@ -197,11 +200,10 @@ def quality_filter(example: dict, min_confidence: float, min_rr: float) -> bool:
 # ── Dedup + balance ───────────────────────────────────────────────────
 
 def _dedup_key(example: dict) -> str:
-    try:
-        txt = example["messages"][2]["content"]   # first assistant turn (trade JSON)
-    except Exception:
-        txt = json.dumps(example)
-    return hashlib.sha1(txt.encode("utf-8", "ignore")).hexdigest()[:20]
+    m = example.get("_meta", {})
+    key = (f"{m.get('symbol')}|{m.get('date')}|{m.get('action')}"
+           f"|{round(float(m.get('sl') or 0), 1)}|{round(float(m.get('tp') or 0), 1)}")
+    return hashlib.sha1(key.encode()).hexdigest()[:20]
 
 
 def _action(example: dict) -> str:
@@ -286,7 +288,23 @@ def build_dataset(
             "val":   filtered[n - n_val - n_test: n - n_test],
             "test":  filtered[n - n_test:],
         }
-        print(f"Split: time (walk-forward)")
+        # 5-day embargo: drop val/test examples within 5 calendar days of any train date
+        from datetime import datetime as _dt
+        train_dates = {e["_meta"]["date"] for e in splits["train"]}
+
+        def _embargoed(date: str, gap: int = 5) -> bool:
+            try:
+                dt = _dt.strptime(date, "%Y-%m-%d")
+                return any(abs((_dt.strptime(d, "%Y-%m-%d") - dt).days) <= gap
+                           for d in train_dates)
+            except Exception:
+                return False
+
+        before_embargo = len(splits["val"]) + len(splits["test"])
+        splits["val"]  = [e for e in splits["val"]  if not _embargoed(e["_meta"]["date"])]
+        splits["test"] = [e for e in splits["test"] if not _embargoed(e["_meta"]["date"])]
+        removed = before_embargo - len(splits["val"]) - len(splits["test"])
+        print(f"Split: time (walk-forward) | embargo removed {removed} val/test examples")
     else:
         random.seed(seed); random.shuffle(filtered)
         splits = {

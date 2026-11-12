@@ -21,6 +21,7 @@ Usage:
 """
 from __future__ import annotations
 
+import threading
 import torch
 from pathlib import Path
 
@@ -31,6 +32,7 @@ except ImportError:
     pass
 
 _cache: dict = {}   # {(model_path, adapter_path): (model, tokenizer)}
+_cache_lock = threading.Lock()
 
 
 def _load(model_path: str, adapter_path: str | None):
@@ -85,9 +87,10 @@ def generate_hf(
         The model's raw text response (may include JSON).
     """
     key = (model_path, adapter_path)
-    if key not in _cache:
-        _cache[key] = _load(model_path, adapter_path)
-    model, tokenizer = _cache[key]
+    with _cache_lock:
+        if key not in _cache:
+            _cache[key] = _load(model_path, adapter_path)
+        model, tokenizer = _cache[key]
 
     _FALLBACK_TMPL = (
         "{% for message in messages %}"

@@ -32,7 +32,7 @@ except ImportError:
 
 HF_MODEL   = os.environ.get("HF_MODEL",   "")
 HF_ADAPTER = os.environ.get("HF_ADAPTER", "")
-HOST       = os.environ.get("HOST",  "0.0.0.0")
+HOST       = os.environ.get("SERVE_HOST", os.environ.get("HOST", "127.0.0.1"))
 PORT       = int(os.environ.get("PORT", 8000))
 
 if not HF_MODEL:

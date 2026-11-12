@@ -51,9 +51,7 @@ BATCH_SIZE  = int(os.environ.get("BATCH_SIZE",     1))
 GRAD_ACCUM  = int(os.environ.get("GRAD_ACCUM",     8))
 MAX_SEQ_LEN = int(os.environ.get("MAX_SEQ_LEN",    1024))
 MAX_STEPS   = int(os.environ.get("MAX_STEPS",      -1))   # -1 = full epoch
-LOGGING_STEPS = int(os.environ.get("LOGGING_STEPS",  10))
-EVAL_STEPS    = int(os.environ.get("EVAL_STEPS",     50))
-SAVE_STEPS    = int(os.environ.get("SAVE_STEPS",    100))
+LOGGING_STEPS = int(os.environ.get("LOGGING_STEPS",  1))
 MLFLOW_URI  = os.environ.get("MLFLOW_URI",   "mlruns")
 EXPERIMENT  = os.environ.get("MLFLOW_EXPERIMENT", "trading-nemotron-lora")
 # When 1, only compute loss on assistant tokens (ignores system+user tokens).
@@ -158,61 +156,6 @@ def load_chat_dataset(path: str, tokenizer):
     return ds
 
 
-def _detect_response_template(tokenizer) -> str | None:
-    """Find the exact string that immediately precedes the assistant's reply
-    in the model's chat format. Used by DataCollatorForCompletionOnlyLM so
-    that loss is computed only on assistant tokens."""
-    try:
-        # Build a minimal two-turn example and locate where the assistant text starts.
-        dummy_text = tokenizer.apply_chat_template(
-            [{"role": "user",      "content": "__USR__"},
-             {"role": "assistant", "content": "__AST__"}],
-            tokenize=False,
-            add_generation_prompt=False,
-        )
-        idx = dummy_text.find("__AST__")
-        if idx < 0:
-            return None
-        # Walk back to find a meaningful boundary (newline, >, or special token)
-        before = dummy_text[:idx]
-        for sep in ("\n", ">", "]"):
-            pos = before.rfind(sep)
-            if pos >= 0:
-                candidate = before[pos + 1:]
-                if candidate:
-                    return candidate
-        return before[-10:] if len(before) >= 10 else before
-    except Exception:
-        return None
-
-
-# ── Completion-only collator (manual, for trl >= 1.0 where DataCollatorForCompletionOnlyLM was removed)
-def _make_completion_only_collator(tokenizer, response_template: str):
-    """Mask system+user tokens so loss is computed on assistant tokens only."""
-    import torch
-    from transformers import DataCollatorForLanguageModeling
-
-    template_ids = tokenizer.encode(response_template, add_special_tokens=False)
-
-    class CompletionOnlyCollator(DataCollatorForLanguageModeling):
-        def __init__(self):
-            super().__init__(tokenizer=tokenizer, mlm=False)
-
-        def torch_call(self, examples):
-            batch = super().torch_call(examples)
-            for i, labels in enumerate(batch["labels"]):
-                input_ids = batch["input_ids"][i].tolist()
-                n = len(template_ids)
-                # Find last occurrence of response_template token sequence
-                mask_until = 0
-                for j in range(len(input_ids) - n, -1, -1):
-                    if input_ids[j:j+n] == template_ids:
-                        mask_until = j + n
-                        break
-                batch["labels"][i][:mask_until] = -100
-            return batch
-
-    return CompletionOnlyCollator()
 
 
 # ── MLflow callback ───────────────────────────────────────────────────────────
@@ -260,6 +203,15 @@ def train_lora(
     else:
         print("[train] completion-only loss: OFF (RESPONSE_ONLY_LOSS=0)")
 
+    # Compute step counts so warmup/eval never exceed total steps
+    steps_per_epoch = max(1, len(train_ds) // (BATCH_SIZE * GRAD_ACCUM))
+    total_steps     = steps_per_epoch * EPOCHS if MAX_STEPS < 0 else MAX_STEPS
+    warmup_steps    = max(1, int(total_steps * 0.03))   # 3% of actual total steps
+    eval_steps      = max(1, total_steps // 5)          # evaluate 5× per run
+    save_steps      = eval_steps
+    print(f"[train] steps_per_epoch={steps_per_epoch} total={total_steps} "
+          f"warmup={warmup_steps} eval={eval_steps}")
+
     # SFTConfig = TrainingArguments + SFT-specific fields (trl >= 1.0)
     sft_args = SFTConfig(
         output_dir=output_dir,
@@ -272,12 +224,12 @@ def train_lora(
         bf16=False,
         logging_steps=LOGGING_STEPS,
         eval_strategy="steps" if MAX_STEPS < 0 else "no",
-        eval_steps=EVAL_STEPS,
+        eval_steps=eval_steps,
         save_strategy="steps" if MAX_STEPS < 0 else "no",
-        save_steps=SAVE_STEPS,
+        save_steps=save_steps,
         load_best_model_at_end=(MAX_STEPS < 0),
         report_to="none",
-        warmup_steps=max(1, int(EPOCHS * 0.03)),  # ~3% warmup (SFTConfig has no warmup_ratio)
+        warmup_steps=warmup_steps,
         lr_scheduler_type="cosine",
         dataloader_pin_memory=(device == "cuda"),
         # SFT-specific

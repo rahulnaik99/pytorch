@@ -24,9 +24,15 @@ except ImportError:
 import os
 DB_PATH = os.environ.get("DB_PATH", "mock.db")
 
+def _db() -> sqlite3.Connection:
+    con = sqlite3.connect(DB_PATH, timeout=30)
+    con.execute("PRAGMA busy_timeout=30000")
+    return con
+
+
 # ── Make sure DB has the right schema ────────────────────────────────────────
 def _ensure_db():
-    with sqlite3.connect(DB_PATH) as con:
+    with _db() as con:
         con.executescript("""
             CREATE TABLE IF NOT EXISTS trade_log (
                 id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -315,7 +321,7 @@ def _make_sample(date: str, symbol: str = "CANBK", slot: str | None = None) -> d
 def insert_mock(count: int = 60, clear_mock: bool = False):
     _ensure_db()
 
-    with sqlite3.connect(DB_PATH) as con:
+    with _db() as con:
         if clear_mock:
             con.execute("DELETE FROM trade_log WHERE reasoning LIKE 'Bullish EMA stack%' "
                         "OR reasoning LIKE 'Bearish EMA stack%' "
@@ -333,7 +339,7 @@ def insert_mock(count: int = 60, clear_mock: bool = False):
     chosen = available[:count]
 
     inserted = skipped = 0
-    with sqlite3.connect(DB_PATH) as con:
+    with _db() as con:
         for date, slot in chosen:
             row = _make_sample(date, slot=slot)
             try:
@@ -362,7 +368,7 @@ def insert_mock(count: int = 60, clear_mock: bool = False):
                 skipped += 1
 
     # Summary
-    with sqlite3.connect(DB_PATH) as con:
+    with _db() as con:
         actions = con.execute(
             "SELECT action, COUNT(*) FROM trade_log GROUP BY action"
         ).fetchall()

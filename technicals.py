@@ -42,7 +42,8 @@ class TechnicalsAnalyzer:
     def __init__(self, csv_dir: str = CSV_DIR, vix_csv: str = ""):
         self.csv_dir = csv_dir
         self.vix_csv = vix_csv or VIX_CSV or str(Path(csv_dir) / "INDIAVIX.csv")
-        self._raw_cache: dict[str, pd.DataFrame] = {}
+        self._raw_cache:    dict[str, pd.DataFrame] = {}   # symbol → daily bars
+        self._minute_cache: dict[str, pd.DataFrame] = {}   # symbol → minute bars
         self._vix_cache: pd.DataFrame | None = None
         self._vix_loaded = False
 
@@ -123,22 +124,40 @@ class TechnicalsAnalyzer:
         return df
 
     def load_forward(self, symbol: str, from_date: str, n: int = 5) -> pd.DataFrame:
-        """Next `n` daily bars strictly after `from_date` (for outcome simulation)."""
+        """Next `n` trading days of minute bars strictly after `from_date`.
+
+        Returns minute-level bars so simulate_outcome() can resolve intraday
+        SL/TP order correctly. Falls back to daily bars if minute data unavailable.
+        """
+        minute = self._load_minute(symbol)
+        if not minute.empty:
+            fwd = minute[minute.index.normalize() > pd.Timestamp(from_date)]
+            # Take bars from the next n unique trading days
+            trading_days = sorted(fwd.index.normalize().unique())[:n]
+            if trading_days:
+                cutoff = trading_days[-1] + pd.Timedelta(days=1)
+                return fwd[fwd.index.normalize() <= trading_days[-1]].copy()
+        # Fallback: daily bars
         hist = self._load_raw(symbol)
         return hist[hist.index > pd.Timestamp(from_date)].head(n).copy()
 
+    def _load_minute(self, symbol: str) -> pd.DataFrame:
+        """Return cached minute-level DataFrame for symbol (CSV mode only)."""
+        if symbol in self._minute_cache:
+            return self._minute_cache[symbol]
+        if DATA_SOURCE != "csv":
+            self._minute_cache[symbol] = pd.DataFrame()
+            return self._minute_cache[symbol]
+        path = Path(self.csv_dir) / f"{symbol}.csv"
+        raw = self._load_csv_raw_minutely(path)
+        self._minute_cache[symbol] = raw if raw is not None else pd.DataFrame()
+        return self._minute_cache[symbol]
+
     def load_intraday(self, symbol: str, as_of: str, rule: str, n_bars: int = 160) -> pd.DataFrame:
         """Resample minute data to `rule` (e.g. '15min', '1h'), up to `as_of`."""
-        raw = self._raw_cache.get(symbol)
-        if raw is None:
-            if DATA_SOURCE != "csv":
-                return pd.DataFrame()
-            path = Path(self.csv_dir) / f"{symbol}.csv"
-            if not path.exists():
-                return pd.DataFrame()
-            raw = self._load_csv_raw_minutely(path)
-            if raw is None or raw.empty:
-                return pd.DataFrame()
+        raw = self._load_minute(symbol)
+        if raw.empty:
+            return pd.DataFrame()
         cutoff = pd.Timestamp(as_of) + pd.Timedelta(days=1)
         sliced = raw[raw.index < cutoff]
         if sliced.empty:
@@ -176,27 +195,38 @@ class TechnicalsAnalyzer:
         decision_slot: which intraday price to use as 'current' price —
             "close" (default), "open", or "mid" ((high+low)/2).
         """
-        close, high, low, vol = df["close"], df["high"], df["low"], df["volume"]
         last = df.iloc[-1]
-        if decision_slot == "open":
-            cur = float(last["open"])
-        elif decision_slot == "mid":
-            cur = (float(last["high"]) + float(last["low"])) / 2
+
+        # Split to avoid look-ahead: for open/mid the day's close/high/low are unknown
+        if decision_slot in ("open", "mid"):
+            if len(df) < 2:
+                raise ValueError("Need at least 2 bars for open/mid slot computation")
+            ind_df = df.iloc[:-1]   # indicators use only data through previous close
+            cur = float(last["open"]) if decision_slot == "open" \
+                  else (float(last["high"]) + float(last["low"])) / 2
         else:
-            cur = float(close.iloc[-1])
+            ind_df = df
+            cur = float(last["close"])
+
+        close = ind_df["close"]
+        high  = ind_df["high"]
+        low   = ind_df["low"]
+        vol   = ind_df["volume"]
+
         e50  = float(close.ewm(span=50,  adjust=False).mean().iloc[-1])
         e100 = float(close.ewm(span=100, adjust=False).mean().iloc[-1])
         e200 = float(close.ewm(span=200, adjust=False).mean().iloc[-1])
         tp   = (high + low + close) / 3
         vwap = float((tp * vol).cumsum().iloc[-1] / max(float(vol.cumsum().iloc[-1]), 1e-9))
 
-        # ── Two-TF pivot detection ──────────────────────────────────
-        # Long TF (full df, order=5): only clear major structural pivots
-        pivots_long  = self._detect_pivots(high, order=5) + self._detect_pivots(low, order=5)
-        # Short TF (last 30 bars, order=2): granular recent swings
-        df30 = df.iloc[-30:]
-        pivots_short = (self._detect_pivots(df30["high"], order=2) +
-                        self._detect_pivots(df30["low"],  order=2))
+        # ── Two-TF pivot detection (type-restricted to prevent cross-series mislabels) ──
+        # Long TF (full ind_df, order=5): only clear major structural pivots
+        pivots_long  = (self._detect_pivots(high, order=5, pivot_type="high") +
+                        self._detect_pivots(low,  order=5, pivot_type="low"))
+        # Short TF (last 30 bars of ind_df, order=2): granular recent swings
+        df30 = ind_df.iloc[-30:]
+        pivots_short = (self._detect_pivots(df30["high"], order=2, pivot_type="high") +
+                        self._detect_pivots(df30["low"],  order=2, pivot_type="low"))
 
         trend, structure = self._classify_structure(pivots_long)
         sup = [(l, h, m) for l, h, m in self._cluster_zones(pivots_long, "low")  if m < cur]
@@ -214,11 +244,11 @@ class TechnicalsAnalyzer:
                   .assign(date=lambda d: d["date"].astype(str)).round(2)
                   .to_dict(orient="records"))
 
-        # ── Volume trend analysis ───────────────────────────────────
+        # ── Volume trend analysis (uses ind_df to avoid look-ahead) ───
         volume_analysis: dict = {}
-        if len(df) >= 6:
+        if len(ind_df) >= 6:
             avg_5d  = float(vol.iloc[-5:].mean())
-            avg_20d = float(vol.iloc[-20:].mean()) if len(df) >= 20 else avg_5d
+            avg_20d = float(vol.iloc[-20:].mean()) if len(ind_df) >= 20 else avg_5d
             v_ratio = round(avg_5d / avg_20d, 2) if avg_20d > 0 else 1.0
             v_trend = "up"   if v_ratio > 1.10 else "down" if v_ratio < 0.90 else "flat"
             p5_chg  = float(close.iloc[-1]) - float(close.iloc[-6])
@@ -263,14 +293,35 @@ class TechnicalsAnalyzer:
             "recent_candles":  recent,
         }
 
-    def _detect_pivots(self, series: pd.Series, order: int = 2):
-        pivots = []
+    def _detect_pivots(self, series: pd.Series, order: int = 2,
+                       pivot_type: str = "both") -> list:
+        """Detect pivot points in a price series.
+
+        pivot_type: "high" returns only local maxima (use with the high series),
+                    "low" returns only local minima (use with the low series),
+                    "both" returns both types (default, for series that mix them).
+
+        Passing pivot_type="high" with a high-column series and pivot_type="low"
+        with a low-column series avoids mislabelling: a local minimum of the high
+        column would have a high-column price but be tagged as "low", corrupting
+        support/resistance clustering.
+        """
+        pivots: list = []
+        seen: set = set()   # deduplicate flat tops / double bottoms at same price
         for i in range(order, len(series) - order):
             win = series.iloc[i - order: i + order + 1]
-            if series.iloc[i] == win.max():
-                pivots.append(("high", series.index[i], float(series.iloc[i])))
-            elif series.iloc[i] == win.min():
-                pivots.append(("low", series.index[i], float(series.iloc[i])))
+            v   = series.iloc[i]
+            idx = series.index[i]
+            if pivot_type in ("high", "both") and v == win.max():
+                key = ("high", round(float(v), 4))
+                if key not in seen:
+                    seen.add(key)
+                    pivots.append(("high", idx, float(v)))
+            elif pivot_type in ("low", "both") and v == win.min():
+                key = ("low", round(float(v), 4))
+                if key not in seen:
+                    seen.add(key)
+                    pivots.append(("low", idx, float(v)))
         return pivots
 
     def _round_levels(self, price: float, window_pct: float = 0.08) -> list[dict]:
