@@ -448,16 +448,24 @@ class TechnicalsAnalyzer:
 
     # ── VIX context ───────────────────────────────────────────────────
 
+    def _load_vix(self) -> None:
+        """Load VIX CSV into cache (idempotent, safe to call from the main thread before forking)."""
+        if self._vix_loaded:
+            return
+        p = Path(self.vix_csv)
+        if p.exists():
+            try:
+                self._vix_cache = self._load_csv(p)
+            except Exception:
+                self._vix_cache = None
+        # Mark loaded only after the attempt completes — a thread that reads the flag
+        # before this line will retry (benign) rather than see a half-loaded cache.
+        self._vix_loaded = True
+
     def vix_context(self, as_of: str) -> dict:
         """VIX regime as of `as_of` (no look-ahead). Returns {} if no VIX file."""
         if not self._vix_loaded:
-            self._vix_loaded = True
-            p = Path(self.vix_csv)
-            if p.exists():
-                try:
-                    self._vix_cache = self._load_csv(p)
-                except Exception:
-                    self._vix_cache = None
+            self._load_vix()
         hist = self._vix_cache
         if hist is None or hist.empty:
             return {}

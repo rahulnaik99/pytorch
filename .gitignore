@@ -17,6 +17,17 @@ data/shards/
 docs/generated/
 .dvc/
 
+# SQLite WAL/SHM side-files (not part of the DB state on their own)
+*.db-wal
+*.db-shm
+
+# Large data files (CSVs, model weights)
+*.csv
+data/prices/
+output/
+
 # OS / editor
 .DS_Store
 .env
+.idea/
+*.swp

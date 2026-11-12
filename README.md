@@ -58,6 +58,7 @@ HF_MODEL=output/nemotron-lora/fused_model python serve.py
 |------|---------|
 | `pipeline.py` | Data generation loop — one SQLite row per trading date |
 | `technicals.py` | `TechnicalsAnalyzer` — EMA, VWAP, S/R zones, VIX, structure |
+| `prompts.py` | Canonical `SYSTEM_PROMPT` + `build_prompt()` — single source of truth |
 | `splitter.py` | SQLite → JSONL with quality filter, dedup, walk-forward split |
 | `train.py` | LoRA training + adapter merge |
 | `inference.py` | HuggingFace model inference with lazy model cache |

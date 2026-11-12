@@ -74,6 +74,10 @@ STAMP_PCT      = float(os.environ.get("STAMP_PCT",      0.00015))
 
 # ── NSE market holidays (weekday dates with no trading) ──────────────
 NSE_HOLIDAYS: set[str] = {
+    # 2022
+    "2022-01-26", "2022-03-18", "2022-04-14", "2022-04-15", "2022-04-18",
+    "2022-05-03", "2022-08-09", "2022-08-15", "2022-10-02", "2022-10-05",
+    "2022-10-24", "2022-10-26", "2022-11-08",
     # 2023
     "2023-01-26", "2023-03-07", "2023-03-30", "2023-04-04", "2023-04-07",
     "2023-04-14", "2023-05-01", "2023-06-28", "2023-08-15", "2023-09-19",
@@ -87,6 +91,13 @@ NSE_HOLIDAYS: set[str] = {
     "2025-02-26", "2025-03-14", "2025-03-31", "2025-04-10", "2025-04-14",
     "2025-04-18", "2025-05-01", "2025-08-15", "2025-08-27", "2025-10-02",
     "2025-10-21", "2025-10-22", "2025-11-05", "2025-12-25",
+    # 2026 (official NSE schedule — verify at nseindia.com before each year)
+    "2026-01-26", "2026-02-18", "2026-03-20", "2026-04-02", "2026-04-03",
+    "2026-04-14", "2026-05-01", "2026-07-20", "2026-08-15", "2026-08-27",
+    "2026-10-01", "2026-10-02", "2026-11-13", "2026-12-25",
+    # 2027 (preliminary — NSE publishes final list ~Nov of prior year)
+    "2027-01-26", "2027-03-11", "2027-03-26", "2027-03-29", "2027-04-14",
+    "2027-08-15", "2027-10-21", "2027-10-22", "2027-11-05", "2027-12-25",
 }
 
 # ── Database ──────────────────────────────────────────────────────────
@@ -474,6 +485,15 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         print(f"  [skip] {symbol} {date} — candles: {e}")
         return None
 
+    # Sanity: last candle should be on or very close to the decision date.
+    # A gap > 10 calendar days usually means the CSV ends before this date.
+    import pandas as _pd
+    last_candle = _pd.Timestamp(df.index[-1]).normalize()
+    gap_days = (_pd.Timestamp(date) - last_candle).days
+    if gap_days > 10:
+        print(f"  [warn] {symbol} {date} — last candle is {last_candle.date()} "
+              f"({gap_days}d gap); CSV may be stale")
+
     # 3. Compute technicals for the chosen slot, VIX, zones
     try:
         tech = ta.compute(df, decision_slot=slot)
@@ -641,6 +661,13 @@ if __name__ == "__main__":
         # CSV minute-bar load takes ~36s per symbol; paying it once prevents every
         # thread re-parsing the file and avoids concurrent dict-write races.
         ta_shared = TechnicalsAnalyzer()
+        # VIX must be preloaded in the main thread: _vix_loaded flag is set only after
+        # the file is read, so a concurrent thread seeing the flag unset, racing into
+        # _load_vix, and losing the dict write would return {} silently.
+        try:
+            ta_shared._load_vix()
+        except Exception:
+            pass
         for sym in {s for s, _, _ in work}:
             try:
                 ta_shared._load_raw(sym)

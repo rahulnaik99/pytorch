@@ -167,6 +167,37 @@ def _make_mlflow_callback():
     return MLflowStepCallback()
 
 
+# ── Token length diagnostics ──────────────────────────────────────────────────
+
+def _log_token_lengths(ds, tokenizer, max_seq_len: int, sample: int = 500) -> None:
+    """Log token length distribution and warn if examples risk being truncated."""
+    import random as _random
+    rows = ds if len(ds) <= sample else ds.select(
+        _random.sample(range(len(ds)), sample)
+    )
+    lengths = []
+    for ex in rows:
+        msgs = ex["messages"]
+        try:
+            text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+        except Exception:
+            text = " ".join(m["content"] for m in msgs)
+        lengths.append(len(tokenizer.encode(text, add_special_tokens=False)))
+
+    if not lengths:
+        return
+    lengths.sort()
+    n = len(lengths)
+    p50  = lengths[n // 2]
+    p95  = lengths[int(n * 0.95)]
+    pmax = lengths[-1]
+    print(f"[token-len] n={n} median={p50} p95={p95} max={pmax} limit={max_seq_len}")
+    if p95 > max_seq_len * 0.9:
+        print(f"[token-len] WARNING: p95 ({p95}) is >{int(max_seq_len*0.9)} tokens — "
+              f"{sum(1 for l in lengths if l > max_seq_len)} examples will be truncated. "
+              f"Consider raising MAX_SEQ_LEN (currently {max_seq_len}).")
+
+
 # ── Training ──────────────────────────────────────────────────────────────────
 
 def train_lora(
@@ -188,6 +219,8 @@ def train_lora(
     train_ds = load_chat_dataset(train_path, tokenizer)
     val_ds   = load_chat_dataset(val_path,   tokenizer)
     print(f"Train: {len(train_ds)} examples | Val: {len(val_ds)} examples")
+
+    _log_token_lengths(train_ds, tokenizer, MAX_SEQ_LEN)
 
     if RESPONSE_ONLY_LOSS:
         print("[train] completion-only loss: ON (via SFTConfig)")
