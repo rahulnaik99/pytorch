@@ -35,6 +35,8 @@ HF_ADAPTER = os.environ.get("HF_ADAPTER", "")
 HOST       = os.environ.get("SERVE_HOST", os.environ.get("HOST", "127.0.0.1"))
 PORT       = int(os.environ.get("PORT", 8000))
 
+from prompts import SYSTEM_PROMPT as _SYSTEM_PROMPT
+
 if not HF_MODEL:
     raise SystemExit("Set HF_MODEL env var to a model path or HuggingFace model ID")
 
@@ -63,7 +65,7 @@ def _build_app():
     @app.post("/api/chat")
     def chat(req: ChatRequest):
         from inference import generate_hf
-        sys_msg  = next((m.content for m in req.messages if m.role == "system"), "")
+        sys_msg  = next((m.content for m in req.messages if m.role == "system"), _SYSTEM_PROMPT)
         user_msg = next((m.content for m in req.messages if m.role == "user"),   "")
         t0 = time.time()
         response = generate_hf(HF_MODEL, sys_msg, user_msg,

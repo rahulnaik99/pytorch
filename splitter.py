@@ -126,7 +126,7 @@ def build_example(trade: dict) -> dict:
         except Exception:
             features_used = None
 
-    key_risk = _tech_field(trade, "key_risk", None)
+    key_risk = trade.get("key_risk") or None
 
     assistant_payload: dict = {
         "action":        trade["action"],
@@ -305,6 +305,10 @@ def build_dataset(
         splits["test"] = [e for e in splits["test"] if not _embargoed(e["_meta"]["date"])]
         removed = before_embargo - len(splits["val"]) - len(splits["test"])
         print(f"Split: time (walk-forward) | embargo removed {removed} val/test examples")
+        if not splits["val"]:
+            print("WARNING: val set empty after 5-day embargo — consider SPLIT_MODE=random")
+        if not splits["test"]:
+            print("WARNING: test set empty after 5-day embargo — consider SPLIT_MODE=random")
     else:
         random.seed(seed); random.shuffle(filtered)
         splits = {

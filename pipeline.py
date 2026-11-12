@@ -136,6 +136,7 @@ def init_db() -> None:
                     planned_entry   REAL,
                     post_reasoning  TEXT,
                     is_mock         INTEGER DEFAULT 0,
+                    key_risk        TEXT,
                     created_at      TEXT,
                     UNIQUE(symbol, decision_date, decision_slot)
                 );
@@ -185,7 +186,7 @@ def init_db() -> None:
         else:
             # Table exists with new schema; add any still-missing columns
             for col, defn in [("planned_entry", "REAL"), ("post_reasoning", "TEXT"),
-                               ("is_mock", "INTEGER DEFAULT 0")]:
+                               ("is_mock", "INTEGER DEFAULT 0"), ("key_risk", "TEXT")]:
                 if col not in cols:
                     con.execute(f"ALTER TABLE trade_log ADD COLUMN {col} {defn}")
             # Idempotent: tag rows written by mock_data.py that pre-date the is_mock column
@@ -215,8 +216,8 @@ def _store(row: dict) -> None:
                exit_price, exit_date, exit_reason, pnl, reasoning, confidence,
                features_used, technicals_json, prompt_text,
                decision_slot, planned_entry, post_reasoning,
-               is_mock, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               is_mock, key_risk, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             row["symbol"], row["decision_date"], row["action"],
             row["entry_price"], row["stop_loss"], row["take_profit"],
@@ -229,6 +230,7 @@ def _store(row: dict) -> None:
             row.get("planned_entry"),
             row.get("post_reasoning"),
             0,  # is_mock=0 for all real pipeline rows
+            row.get("key_risk") or "",
             datetime.now().isoformat(),
         ))
 
@@ -379,19 +381,28 @@ def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
 def simulate_outcome(action: str, entry: float, sl: float, tp: float,
                      fwd_df, max_hold: int = MAX_HOLD_DAYS,
                      planned_entry: float | None = None):
-    """Simulate trade outcome.
+    """Simulate trade outcome against forward price bars.
 
-    If planned_entry is set and differs from entry (limit order), Phase 1 checks
-    if the fill level is reached before proceeding. Phase 2 tracks SL/TP from
-    the fill bar onward.
+    Accepts both minute-bar and daily-bar DataFrames. `max_hold` is treated as
+    the number of *trading days*, not bars — so this works correctly after
+    `load_forward()` switched to returning minute data.
 
-    Returns: (exit_reason, exit_price, exit_date, bars_held)
-    exit_reason can be 'ENTRY_NOT_FILLED' when a limit entry never triggers.
+    Returns: (exit_reason, exit_price, exit_date, days_held)
+    exit_reason: 'TP_HIT' | 'SL_HIT' | 'TIME_EXIT' | 'ENTRY_NOT_FILLED' | 'HOLD'
     """
     if action == "HOLD" or not sl or not tp or fwd_df.empty:
         return "HOLD", entry, None, 0
 
-    bars = list(fwd_df.head(max_hold).iterrows())
+    # Build a N-trading-day window — works for both minute and daily bars
+    trading_days = sorted(fwd_df.index.normalize().unique())
+    n_days = min(max_hold, len(trading_days))
+    if not trading_days:
+        return "TIME_EXIT", round(float(fwd_df.iloc[-1]["close"]), 2), \
+               str(fwd_df.index[-1].date()), 0
+    cutoff = trading_days[n_days - 1]
+    window = fwd_df[fwd_df.index.normalize() <= cutoff]
+
+    bars = list(window.iterrows())
     fill_price = entry   # default: immediate market fill
 
     # Phase 1 — wait for limit fill (only when planned_entry differs from current price)
@@ -404,9 +415,9 @@ def simulate_outcome(action: str, entry: float, sl: float, tp: float,
             if action == "SELL" and hi >= planned_entry:
                 fill_price = planned_entry; bars = bars[i:]; filled = True; break
         if not filled:
-            last = fwd_df.head(max_hold).iloc[-1]
+            last = window.iloc[-1]
             return "ENTRY_NOT_FILLED", round(float(last["close"]), 2), \
-                   str(fwd_df.head(max_hold).index[-1].date()), max_hold
+                   str(window.index[-1].date()), n_days
 
     # Phase 2 — track SL/TP from fill bar onward
     for i, (idx, row) in enumerate(bars):
@@ -419,8 +430,8 @@ def simulate_outcome(action: str, entry: float, sl: float, tp: float,
             if hi >= sl: return "SL_HIT", round(sl, 2), ds, i + 1
             if lo <= tp: return "TP_HIT", round(tp, 2), ds, i + 1
 
-    last = fwd_df.head(max_hold).iloc[-1]
-    return "TIME_EXIT", round(float(last["close"]), 2), str(fwd_df.head(max_hold).index[-1].date()), max_hold
+    last = window.iloc[-1]
+    return "TIME_EXIT", round(float(last["close"]), 2), str(window.index[-1].date()), n_days
 
 
 def compute_pnl(action: str, entry: float, exit_p: float, qty: int) -> float:
@@ -489,6 +500,7 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     tp      = _safe_num(dec.get("take_profit", 0))
     conf    = _safe_num(dec.get("confidence", 0.5), 0.5)
     qty     = max(1, int(_safe_num(dec.get("quantity", 1), 1)))
+    key_risk = dec.get("key_risk", "") or ""
 
     # planned_entry: LLM's limit price, falls back to current close (market order)
     pe_raw = _safe_num(dec.get("planned_entry", 0))
@@ -541,6 +553,7 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         "decision_slot": slot,
         "planned_entry": round(planned_entry, 2),
         "post_reasoning": post_rsn,
+        "key_risk": key_risk,
     }
 
 
@@ -624,10 +637,21 @@ if __name__ == "__main__":
                   f"note: single Ollama instance queues LLM calls; "
                   f"speedup from parallel data loading + multi-symbol interleaving")
 
+        # Preload all symbol caches in the main thread before spawning workers.
+        # CSV minute-bar load takes ~36s per symbol; paying it once prevents every
+        # thread re-parsing the file and avoids concurrent dict-write races.
+        ta_shared = TechnicalsAnalyzer()
+        for sym in {s for s, _, _ in work}:
+            try:
+                ta_shared._load_raw(sym)
+                ta_shared._load_minute(sym)
+            except Exception:
+                pass
+
         def _job(item: tuple[str, str, str]) -> dict | None:
             sym, date, slot = item
-            ta_local = TechnicalsAnalyzer()   # one per thread — avoids shared state
-            row = generate_sample(ta_local, sym, date, slot)
+            # ta_shared caches are fully populated — workers only read (CPython GIL safe)
+            row = generate_sample(ta_shared, sym, date, slot)
             if row:
                 _store(row)
             return row

@@ -33,6 +33,7 @@ except ImportError:
 
 _cache: dict = {}   # {(model_path, adapter_path): (model, tokenizer)}
 _cache_lock = threading.Lock()
+_gen_lock   = threading.Lock()   # GPU forward pass is not thread-safe on MPS/CUDA
 
 
 def _load(model_path: str, adapter_path: str | None):
@@ -114,7 +115,7 @@ def generate_hf(
         )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-    with torch.no_grad():
+    with _gen_lock, torch.no_grad():
         output_ids = model.generate(
             **inputs,
             max_new_tokens=max_tokens,

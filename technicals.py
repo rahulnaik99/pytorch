@@ -83,11 +83,20 @@ class TechnicalsAnalyzer:
         dt_col = next((c for c in df.columns if c in _EXACT),
                       next((c for c in df.columns if "date" in c or "time" in c), df.columns[0]))
 
-        # Parse dates — handles both ISO (2024-01-10) and Indian dayfirst (30-12-2022)
-        try:
-            df[dt_col] = pd.to_datetime(df[dt_col], dayfirst=True, format="mixed", errors="coerce")
-        except TypeError:
-            df[dt_col] = pd.to_datetime(df[dt_col], dayfirst=True, errors="coerce")
+        # Parse dates — try ISO format first (NSE default), then Indian dayfirst, then mixed.
+        # Avoids dayfirst=True with format="mixed" which swaps D/M on pandas 3.x when day ≤ 12.
+        _dt_parsed = None
+        for _fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d-%m-%Y %H:%M:%S"):
+            try:
+                _p = pd.to_datetime(df[dt_col], format=_fmt)
+                if not _p.isna().all():
+                    _dt_parsed = _p
+                    break
+            except (ValueError, TypeError):
+                pass
+        if _dt_parsed is None:
+            _dt_parsed = pd.to_datetime(df[dt_col], dayfirst=False, format="mixed", errors="coerce")
+        df[dt_col] = _dt_parsed
 
         df = df.dropna(subset=[dt_col]).set_index(dt_col).sort_index()
         df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close",
@@ -173,10 +182,21 @@ class TechnicalsAnalyzer:
         _EXACT = ("datetime", "date", "time", "timestamp", "date/time")
         dt_col = next((c for c in df.columns if c in _EXACT),
                       next((c for c in df.columns if "date" in c or "time" in c), df.columns[0]))
-        try:
-            df[dt_col] = pd.to_datetime(df[dt_col], dayfirst=True, format="mixed", errors="coerce")
-        except TypeError:
-            df[dt_col] = pd.to_datetime(df[dt_col], dayfirst=True, errors="coerce")
+        # Parse dates — ISO first (NSE exports), then Indian dayfirst, then mixed fallback.
+        # Avoids dayfirst=True with format="mixed" which swaps D/M on pandas 3.x when day ≤ 12.
+        _dt_parsed2 = None
+        for _fmt2 in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+                      "%d-%m-%Y %H:%M:%S", "%d-%m-%Y %H:%M", "%d-%m-%Y"):
+            try:
+                _p2 = pd.to_datetime(df[dt_col], format=_fmt2)
+                if not _p2.isna().all():
+                    _dt_parsed2 = _p2
+                    break
+            except (ValueError, TypeError):
+                pass
+        if _dt_parsed2 is None:
+            _dt_parsed2 = pd.to_datetime(df[dt_col], dayfirst=False, format="mixed", errors="coerce")
+        df[dt_col] = _dt_parsed2
         df = df.dropna(subset=[dt_col]).set_index(dt_col).sort_index()
         df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close",
                                  "v": "volume", "vol": "volume"})
@@ -238,7 +258,7 @@ class TechnicalsAnalyzer:
 
         stack = ("bullish (50>100>200)" if e50 > e100 > e200 else
                  "bearish (50<100<200)" if e50 < e100 < e200 else "mixed")
-        recent = (df.tail(5).reset_index()
+        recent = (ind_df.tail(5).reset_index()
                   .rename(columns={"Date": "date", "index": "date"})
                   [["date", "open", "high", "low", "close", "volume"]]
                   .assign(date=lambda d: d["date"].astype(str)).round(2)
@@ -289,7 +309,7 @@ class TechnicalsAnalyzer:
                                 for t, d, p in pivots_short if t == "low"],
             "round_levels":    self._round_levels(cur),
             "volume_analysis": volume_analysis,
-            "levels":          self._level_breaks(df, cur),
+            "levels":          self._level_breaks(ind_df, cur),
             "recent_candles":  recent,
         }
 

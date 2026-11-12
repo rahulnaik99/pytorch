@@ -125,36 +125,27 @@ def apply_lora(model):
 def load_chat_dataset(path: str, tokenizer):
     from datasets import load_dataset
 
-    # Minimal fallback template for models without a built-in chat template (e.g. gpt2)
-    _FALLBACK_TMPL = (
-        "{% for message in messages %}"
-        "{% if message['role'] == 'system' %}### System:\n{{ message['content'] }}\n{% endif %}"
-        "{% if message['role'] == 'user' %}### User:\n{{ message['content'] }}\n{% endif %}"
-        "{% if message['role'] == 'assistant' %}### Assistant:\n{{ message['content'] }}\n{% endif %}"
-        "{% endfor %}"
-    )
-
-    def _format(ex):
-        try:
-            text = tokenizer.apply_chat_template(
-                ex["messages"],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        except ValueError:
-            # Tokenizer has no chat template — use simple delimited format
-            tokenizer.chat_template = _FALLBACK_TMPL
-            text = tokenizer.apply_chat_template(
-                ex["messages"],
-                tokenize=False,
-                add_generation_prompt=False,
-            )
-        return {"text": text}
-
     ds = load_dataset("json", data_files=path, split="train")
-    ds = ds.map(_format, remove_columns=ds.column_names)
-    return ds
 
+    # Keep the 'messages' column as-is so SFTTrainer (trl ≥ 1.0) can:
+    #   1. Apply the chat template internally, and
+    #   2. Properly mask non-assistant tokens for completion_only_loss=True.
+    # Converting to a flat 'text' string first loses the message boundaries
+    # and makes the response mask a no-op.
+    if "messages" not in ds.column_names:
+        raise ValueError(f"Dataset {path} has no 'messages' column — cannot load")
+
+    # Ensure the tokenizer has a chat template (Nemotron has one; fallback for gpt2-like models)
+    if not getattr(tokenizer, "chat_template", None):
+        tokenizer.chat_template = (
+            "{% for message in messages %}"
+            "{% if message['role'] == 'system' %}### System:\n{{ message['content'] }}\n{% endif %}"
+            "{% if message['role'] == 'user' %}### User:\n{{ message['content'] }}\n{% endif %}"
+            "{% if message['role'] == 'assistant' %}### Assistant:\n{{ message['content'] }}\n{% endif %}"
+            "{% endfor %}"
+        )
+
+    return ds.select_columns(["messages"])
 
 
 
@@ -233,7 +224,6 @@ def train_lora(
         lr_scheduler_type="cosine",
         dataloader_pin_memory=(device == "cuda"),
         # SFT-specific
-        dataset_text_field="text",
         max_length=MAX_SEQ_LEN,
         completion_only_loss=bool(RESPONSE_ONLY_LOSS),
     )
@@ -292,10 +282,7 @@ def merge_adapter(base_model: str, adapter_path: str, fused_dir: str):
 
 def infer_test(model_path: str):
     from inference import generate_hf
-    system = (
-        "You are a disciplined NSE equity trader. Protect capital first. "
-        "R:R must be >= 1.5. Output JSON only."
-    )
+    from prompts import SYSTEM_PROMPT
     user = (
         "[CANBK 2024-10-10]\n"
         "C:103.5 | EMA50:101.2 EMA200:96.8 [BULLISH]\n"
@@ -304,7 +291,7 @@ def infer_test(model_path: str):
         "Decide. Output JSON only."
     )
     print("Prompt:\n", user)
-    out = generate_hf(model_path, system, user)
+    out = generate_hf(model_path, SYSTEM_PROMPT, user)
     print("\nModel output:\n", out)
 
 
