@@ -199,6 +199,17 @@ def quality_filter(example: dict, min_confidence: float, min_rr: float) -> bool:
     fu = d.get("features_used")
     if isinstance(fu, list) and any(len(str(f)) > 25 for f in fu):
         return False
+    # Reject stub reasoning — one-line responses lack the detail needed for useful training
+    if len(d.get("reasoning", "")) < 80:
+        return False
+    # Reject BUY/SELL with empty key_risk — incomplete training signal
+    if d.get("action") in ("BUY", "SELL") and not str(d.get("key_risk", "")).strip():
+        return False
+    # Reject degenerate SL: distance < 0.5% of entry triggers on spread noise alone
+    pe = float(d.get("planned_entry") or 0)
+    sl = float(d.get("stop_loss") or 0)
+    if pe > 0 and sl > 0 and abs(pe - sl) / pe < 0.005:
+        return False
     return True
 
 

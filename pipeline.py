@@ -516,10 +516,19 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     if rsn == "__llm_failed__":
         print(f"  [skip] {symbol} {date} @{slot}: LLM failed, REQUIRE_LLM=1")
         return None
+    # Skip BUY/SELL rows where the LLM produced a one-line stub instead of the required
+    # 2-3 sentence reasoning — these are rule-fallback rows or incomplete LLM responses
+    # that would be harmful training examples.
+    if action in ("BUY", "SELL") and len(rsn) < 80:
+        print(f"  [skip] {symbol} {date} @{slot}: stub reasoning on {action} ({len(rsn)} chars)")
+        return None
     sl      = _safe_num(dec.get("stop_loss",  0))
     tp      = _safe_num(dec.get("take_profit", 0))
     conf    = _safe_num(dec.get("confidence", 0.5), 0.5)
-    qty     = max(1, int(_safe_num(dec.get("quantity", 1), 1)))
+    # Always use qty=1 for per-unit pnl — rule-based fallback returns a position-sized
+    # quantity but LLM rows have no quantity field, so using dec.get("quantity") caused
+    # wildly inconsistent pnl values (rule rows showed hundreds, LLM rows showed < 2).
+    qty     = 1
     key_risk = dec.get("key_risk", "") or ""
 
     # HOLD means no trade — SL/TP from the LLM are discarded
