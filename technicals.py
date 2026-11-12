@@ -86,7 +86,8 @@ class TechnicalsAnalyzer:
         # Parse dates — try ISO format first (NSE default), then Indian dayfirst, then mixed.
         # Avoids dayfirst=True with format="mixed" which swaps D/M on pandas 3.x when day ≤ 12.
         _dt_parsed = None
-        for _fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y", "%d-%m-%Y %H:%M:%S"):
+        for _fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+                     "%d-%m-%Y", "%d-%m-%Y %H:%M", "%d-%m-%Y %H:%M:%S"):
             try:
                 _p = pd.to_datetime(df[dt_col], format=_fmt)
                 if not _p.isna().all():

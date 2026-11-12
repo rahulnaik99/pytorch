@@ -194,6 +194,11 @@ def quality_filter(example: dict, min_confidence: float, min_rr: float) -> bool:
         return False
     if d.get("risk_reward", 99) < min_rr:
         return False
+    # Reject rows where the LLM returned raw indicator text in features_used
+    # (items like "EMA: 50@109.13 > 100@108.14 > 200@107.41" instead of "ema_stack")
+    fu = d.get("features_used")
+    if isinstance(fu, list) and any(len(str(f)) > 25 for f in fu):
+        return False
     return True
 
 

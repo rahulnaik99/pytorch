@@ -537,6 +537,16 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
               f"({action} entry={planned_entry:.2f} SL={sl:.2f} TP={tp:.2f})")
         return None
 
+    # Warn when SL is less than 30% of the 5-day average range — likely noise-level stop
+    if action in ("BUY", "SELL"):
+        rc = tech.get("recent_candles", [])
+        if rc:
+            avg_range = sum(c.get("high", 0) - c.get("low", 0) for c in rc) / len(rc)
+            sl_dist = abs(planned_entry - sl)
+            if avg_range > 0 and sl_dist < 0.3 * avg_range:
+                print(f"  [warn] {symbol} {date} @{slot}: SL very tight "
+                      f"(dist={sl_dist:.2f}, 30%ATR={0.3 * avg_range:.2f})")
+
     # 5. Simulate outcome (two-phase if planned_entry differs from current close)
     entry_p = tech["close"]
     try:
