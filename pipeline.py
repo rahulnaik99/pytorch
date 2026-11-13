@@ -60,6 +60,7 @@ HF_ADAPTER    = os.environ.get("HF_ADAPTER",   "")
 DB_PATH       = os.environ.get("DB_PATH",       "trading_agent.db")
 RISK_PER_TRADE = float(os.environ.get("RISK_PER_TRADE", 0.02))
 CAPITAL_FOR_QTY = float(os.environ.get("CAPITAL_FOR_QTY", 10_000))
+INVERSE        = os.environ.get("INVERSE", "0").strip().lower() in ("1","true","yes","on")
 
 # Indian equity transaction costs
 INCLUDE_COSTS  = os.environ.get("INCLUDE_COSTS", "1").strip().lower() in ("1","true","yes","on")
@@ -539,6 +540,13 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     # planned_entry: LLM's limit price, falls back to current close (market order)
     pe_raw = _safe_num(dec.get("planned_entry", 0))
     planned_entry = pe_raw if pe_raw > 0 else tech["close"]
+
+    # INVERSE mode: flip BUY→SELL / SELL→BUY and mirror SL/TP symmetrically across entry.
+    # Preserves R:R — the original SL distance becomes the new TP distance and vice-versa.
+    if INVERSE and action in ("BUY", "SELL"):
+        action = "SELL" if action == "BUY" else "BUY"
+        sl     = round(2 * planned_entry - sl, 2)
+        tp     = round(2 * planned_entry - tp, 2)
 
     # Validate SL/TP are on the correct side of entry
     if action in ("BUY", "SELL") and not _validate_trade(action, planned_entry, sl, tp):
