@@ -174,6 +174,155 @@ class TechnicalsAnalyzer:
             return pd.DataFrame()
         return self._resample_ohlcv(sliced, rule).tail(n_bars)
 
+    def load_intraday_for_slot(self, symbol: str, date: str, rule: str,
+                               n_bars: int, slot: str = "close") -> pd.DataFrame:
+        """Like load_intraday but with a sub-day cutoff matching the decision slot.
+
+        open  → bars strictly before 09:15 on `date` (no same-day bars at open)
+        mid   → bars up to 12:00 on `date` (morning session only)
+        close → bars up to 15:30 on `date` (full session)
+        """
+        CUTOFFS = {"open": "09:15:00", "mid": "12:00:00", "close": "15:30:00"}
+        cutoff = pd.Timestamp(f"{date} {CUTOFFS.get(slot, '15:30:00')}")
+        raw = self._load_minute(symbol)
+        if raw.empty:
+            return pd.DataFrame()
+        sliced = raw[raw.index < cutoff]
+        if sliced.empty:
+            return pd.DataFrame()
+        return self._resample_ohlcv(sliced, rule).tail(n_bars)
+
+    def compute_tf(self, df: pd.DataFrame, spans: tuple = (9, 21, 50),
+                   label: str = "1h", pivot_order: int = 5) -> dict:
+        """Compute intraday technicals for a single timeframe.
+
+        Designed for 1H or 5min bars loaded via load_intraday_for_slot.
+        Uses session VWAP (resets daily), skips _level_breaks (meaningless
+        on intraday bars; 1H gets prev-session H/L instead).
+        """
+        if df.empty or len(df) < max(spans):
+            raise ValueError(
+                f"compute_tf({label}): need >= {max(spans)} bars, got {len(df)}")
+
+        close = df["close"].astype(float)
+        high  = df["high"].astype(float)
+        low   = df["low"].astype(float)
+        vol   = df["volume"].astype(float)
+        cur   = float(close.iloc[-1])
+
+        # EMAs with provided spans
+        e_fast = float(close.ewm(span=spans[0], adjust=False).mean().iloc[-1])
+        e_mid  = float(close.ewm(span=spans[1], adjust=False).mean().iloc[-1])
+        e_slow = float(close.ewm(span=spans[2], adjust=False).mean().iloc[-1])
+        if e_fast > e_mid > e_slow:
+            ema_stack = f"bullish ({spans[0]}>{spans[1]}>{spans[2]})"
+        elif e_fast < e_mid < e_slow:
+            ema_stack = f"bearish ({spans[0]}<{spans[1]}<{spans[2]})"
+        else:
+            ema_stack = "mixed"
+
+        # Session VWAP — resets daily; use only bars from the last session date
+        last_date = df.index.normalize()[-1]
+        sess = df[df.index.normalize() == last_date]
+        sess_tp  = (sess["high"] + sess["low"] + sess["close"]) / 3
+        sess_vol = sess["volume"].astype(float)
+        vwap = float((sess_tp * sess_vol).sum() / max(float(sess_vol.sum()), 1e-9))
+
+        # Structure from full window (type-split pivot detection avoids cross-series mislabels)
+        pivots_long = (self._detect_pivots(high, order=pivot_order, pivot_type="high") +
+                       self._detect_pivots(low,  order=pivot_order, pivot_type="low"))
+        trend, structure = self._classify_structure(pivots_long)
+
+        sup_zones_all = self._cluster_zones(pivots_long, "low")
+        res_zones_all = self._cluster_zones(pivots_long, "high")
+        def zf(z): return {"low": z[0], "high": z[1], "mid": z[2]} if z else None
+        sup = [zf(z) for z in sup_zones_all if z[2] < cur]
+        res = [zf(z) for z in res_zones_all if z[2] > cur]
+        ns  = sup[-1] if sup else None
+        nr  = res[0]  if res else None
+
+        # Recent swings (last 30 bars, order=2 for granular short-term pivots)
+        df30 = df.iloc[-30:]
+        pivots_short = (self._detect_pivots(df30["high"].astype(float), order=2, pivot_type="high") +
+                        self._detect_pivots(df30["low"].astype(float),  order=2, pivot_type="low"))
+        swing_highs = [{"date": str(d.date()), "price": round(p, 2)}
+                       for t, d, p in sorted(pivots_long, key=lambda x: x[1]) if t == "high"]
+        swing_lows  = [{"date": str(d.date()), "price": round(p, 2)}
+                       for t, d, p in sorted(pivots_long, key=lambda x: x[1]) if t == "low"]
+
+        # Recent 5 bars for vol analysis
+        rc_df = df.iloc[-5:].reset_index().rename(columns={"index": "date"})
+        recent_candles = [
+            {"date": str(r["date"].date() if hasattr(r["date"], "date") else r["date"]),
+             "open": round(float(r["open"]), 2), "high": round(float(r["high"]), 2),
+             "low":  round(float(r["low"]),  2), "close": round(float(r["close"]), 2),
+             "volume": float(r["volume"])}
+            for _, r in rc_df.iterrows()
+        ]
+
+        # Volume analysis
+        vol_series = df["volume"].astype(float)
+        avg5   = float(vol_series.iloc[-5:].mean())
+        avg20  = float(vol_series.iloc[-20:].mean() if len(vol_series) >= 20 else vol_series.mean())
+        v_ratio = round(float(vol_series.iloc[-1]) / max(avg20, 1), 2)
+        p5_chg  = float(close.iloc[-1]) - float(close.iloc[-6] if len(close) >= 6 else close.iloc[0])
+        p_dir   = "up" if p5_chg > 0 else "down"
+        v_trend = "up" if avg5 / max(avg20, 1) > 1.10 else "down" if avg5 / max(avg20, 1) < 0.90 else "flat"
+        vol_sentiment = {
+            ("up",   "up"):   "bullish_momentum",
+            ("up",   "down"): "exhaustion",
+            ("down", "up"):   "bearish_pressure",
+            ("down", "down"): "potential_base",
+        }.get((p_dir, v_trend), "neutral")
+        volume_analysis = {
+            "avg_5d": round(avg5), "avg_20d": round(avg20), "ratio": v_ratio,
+            "vol_trend": v_trend, "price_dir_5d": p_dir, "sentiment": vol_sentiment,
+        }
+
+        # Previous session H/L (1H only; 5min bars span too short to be meaningful)
+        levels: dict = {}
+        if label == "1h":
+            sessions = sorted(df.index.normalize().unique())
+            if len(sessions) >= 2:
+                prev_sess = df[df.index.normalize() == sessions[-2]]
+                pdh = round(float(prev_sess["high"].max()), 2)
+                pdl = round(float(prev_sess["low"].min()),  2)
+                levels = {
+                    "pdh": pdh, "pdl": pdl,
+                    "pdh_state": "above" if cur > pdh else "below",
+                    "pdl_state": "above" if cur > pdl else "below",
+                }
+
+        return {
+            "close":    round(cur, 2),
+            "ema_fast": round(e_fast, 2),
+            "ema_mid":  round(e_mid,  2),
+            "ema_slow": round(e_slow, 2),
+            "ema_stack": ema_stack,
+            "vwap":     round(vwap,  2),
+            "trend":    trend,
+            "structure": structure,
+            "support_zones":      sup[-3:],
+            "resistance_zones":   res[:3],
+            "nearest_support":    ns,
+            "nearest_resistance": nr,
+            "swing_highs": swing_highs,
+            "swing_lows":  swing_lows,
+            "swing_highs_30d": [{"date": str(d.date()), "price": round(p, 2)}
+                                 for t, d, p in sorted(pivots_short, key=lambda x: x[1])
+                                 if t == "high"],
+            "swing_lows_30d":  [{"date": str(d.date()), "price": round(p, 2)}
+                                 for t, d, p in sorted(pivots_short, key=lambda x: x[1])
+                                 if t == "low"],
+            "recent_candles":  recent_candles,
+            "volume_analysis": volume_analysis,
+            "round_levels":    self._round_levels(cur),
+            "levels":          levels,
+            "label":           label,
+            "n_bars":          len(df),
+            "spans":           list(spans),
+        }
+
     def _load_csv_raw_minutely(self, path: Path) -> pd.DataFrame | None:
         """Load CSV without daily resampling — used for zone detection."""
         if not path.exists():

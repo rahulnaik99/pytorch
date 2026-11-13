@@ -19,7 +19,7 @@ Output ONLY valid JSON:
   "risk_reward": <float>,
   "reasoning": "<2-3 sentences citing specific prices and indicator values>",
   "confidence": <0.0-1.0>,
-  "features_used": ["ema_stack", "vwap", "nearest_support"],
+  "features_used": ["1h_ema_stack", "5m_structure", "1h_support", "5m_demand_zone"],
   "key_risk": "<one-line failure scenario>"
 }"""
 
@@ -187,4 +187,177 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
         f"{levels_line}"
         f"{vix_line}"
         f"{zones_line}"
+    )
+
+
+# ── Multi-timeframe prompt builder ────────────────────────────────────
+
+def build_prompt_mtf(symbol: str, date: str, tf_1h: dict, tf_5m: dict,
+                     vc: dict, zc: dict, decision_slot: str = "close") -> str:
+    """Two-section prompt: 1H long context + 5min short setup."""
+
+    def _bias(stack: str) -> str:
+        if stack.startswith("bullish"): return "bullish"
+        if stack.startswith("bearish"): return "bearish"
+        return "neutral"
+
+    def _fmt_zones_mtf(zones, n=2):
+        parts = []
+        for z in (zones[:n] if zones else []):
+            if z and z.get("low"):
+                close = tf_1h.get("close", 0)
+                d = _pct(z["mid"], close) if close else 0
+                parts.append(f"{z['low']:.1f}-{z['high']:.1f}({d:+.1f}%)")
+        return "  ".join(parts) or "—"
+
+    def _fmt_swings(swings):
+        return "  ".join(f"{s['price']:.1f}({str(s['date'])[5:]})" for s in (swings or [])[-6:]) or "—"
+
+    # ── 1H section ─────────────────────────────────────────────────────
+    c1h   = tf_1h.get("close", 0)
+    e_f1  = tf_1h.get("ema_fast"); e_m1 = tf_1h.get("ema_mid"); e_s1 = tf_1h.get("ema_slow")
+    sp1   = tf_1h.get("spans", [9, 21, 50])
+    stk1  = tf_1h.get("ema_stack", "—")
+    vw1   = tf_1h.get("vwap")
+    bias_1h = _bias(stk1)
+    cvv1  = _pct(c1h, vw1) if vw1 else None
+    cve1  = _pct(c1h, e_s1) if e_s1 else None
+
+    sup1  = list(reversed(tf_1h.get("support_zones") or []))
+    res1  = tf_1h.get("resistance_zones") or []
+    ns1   = tf_1h.get("nearest_support");  ds1 = _pct(ns1["mid"], c1h) if ns1 and c1h else None
+    nr1   = tf_1h.get("nearest_resistance"); dr1 = _pct(nr1["mid"], c1h) if nr1 and c1h else None
+
+    def _fmt_z1(zones, n=2):
+        parts = []
+        for z in (zones[:n] if zones else []):
+            if z and z.get("low"):
+                d = _pct(z["mid"], c1h) if c1h else 0
+                parts.append(f"{z['low']:.1f}-{z['high']:.1f}({d:+.1f}%)")
+        return "  ".join(parts) or "—"
+
+    sh1   = _fmt_swings(tf_1h.get("swing_highs"))
+    sl1   = _fmt_swings(tf_1h.get("swing_lows"))
+    lv1   = tf_1h.get("levels") or {}
+    rl1   = tf_1h.get("round_levels") or []
+    n1    = tf_1h.get("n_bars", 90)
+
+    pdh_line = ""
+    if lv1.get("pdh"):
+        pdh_line = (f"PDH(sess):{lv1['pdh']}({lv1.get('pdh_state','')})"
+                    f"  PDL(sess):{lv1['pdl']}({lv1.get('pdl_state','')})\n")
+
+    def _fmt_round(rl, n=4):
+        if not rl: return ""
+        sup_r = [r for r in rl if r.get("side") == "support"][-2:]
+        res_r = [r for r in rl if r.get("side") == "resistance"][:2]
+        merged = sorted(sup_r + res_r, key=lambda r: abs(r["dist_pct"]))[:n]
+        t = lambda r: "M" if r.get("type") == "major" else "m"
+        return "ROUND: " + "  ".join(f"{r['level']}({t(r)},{r['dist_pct']:+.1f}%)" for r in merged) + "\n"
+
+    round1 = _fmt_round(rl1)
+
+    # ema ordering symbol for 1H
+    def _es(a, b): return ">" if (a or 0) > (b or 0) else "<"
+    e1_str = (f"EMA{sp1[0]}@{e_f1} {_es(e_f1,e_m1)} "
+              f"EMA{sp1[1]}@{e_m1} {_es(e_m1,e_s1)} "
+              f"EMA{sp1[2]}@{e_s1} [{stk1.split()[0].upper()}]\n") if e_f1 else ""
+
+    block_1h = (
+        f"━━ 1H ({n1} bars)  LONG BIAS: {bias_1h} ━━\n"
+        f"Trend:{tf_1h.get('trend','-')} | "
+        f"Struct:{','.join(tf_1h.get('structure',[]) or ['-'])}\n"
+        f"{e1_str}"
+        f"VWAP(sess):{vw1}  C{'+' if (cvv1 or 0)>=0 else ''}{cvv1}%"
+        f" | C vs EMA{sp1[2]}:{'+' if (cve1 or 0)>=0 else ''}{cve1}%\n"
+        f"S:{_fmt_z1(sup1)}  (nearest {(ds1 or 0):+.1f}%)\n"
+        f"R:{_fmt_z1(res1)}  (nearest {'+' if (dr1 or 0)>=0 else ''}{dr1 or 0}%)\n"
+        f"SWH: {sh1}\n"
+        f"SWL: {sl1}\n"
+        f"{pdh_line}"
+        f"{round1}"
+    )
+
+    # ── 5min section ───────────────────────────────────────────────────
+    c5m   = tf_5m.get("close", 0)
+    e_f5  = tf_5m.get("ema_fast"); e_m5 = tf_5m.get("ema_mid"); e_s5 = tf_5m.get("ema_slow")
+    sp5   = tf_5m.get("spans", [9, 21, 50])
+    stk5  = tf_5m.get("ema_stack", "—")
+    vw5   = tf_5m.get("vwap")
+    bias_5m = _bias(stk5)
+    cvv5  = _pct(c5m, vw5) if vw5 else None
+
+    sup5  = list(reversed(tf_5m.get("support_zones") or []))
+    res5  = tf_5m.get("resistance_zones") or []
+    ns5   = tf_5m.get("nearest_support");  ds5 = _pct(ns5["mid"], c5m) if ns5 and c5m else None
+    nr5   = tf_5m.get("nearest_resistance"); dr5 = _pct(nr5["mid"], c5m) if nr5 and c5m else None
+
+    def _fmt_z5(zones, n=2):
+        parts = []
+        for z in (zones[:n] if zones else []):
+            if z and z.get("low"):
+                d = _pct(z["mid"], c5m) if c5m else 0
+                parts.append(f"{z['low']:.1f}-{z['high']:.1f}({d:+.1f}%)")
+        return "  ".join(parts) or "—"
+
+    sh5  = _fmt_swings(tf_5m.get("swing_highs"))
+    sl5  = _fmt_swings(tf_5m.get("swing_lows"))
+    n5   = tf_5m.get("n_bars", 90)
+    e5_str = (f"EMA{sp5[0]}@{e_f5} {_es(e_f5,e_m5)} "
+              f"EMA{sp5[1]}@{e_m5} {_es(e_m5,e_s5)} "
+              f"EMA{sp5[2]}@{e_s5} [{stk5.split()[0].upper()}]\n") if e_f5 else ""
+
+    block_5m = (
+        f"━━ 5M ({n5} bars)  SHORT BIAS: {bias_5m} ━━\n"
+        f"Trend:{tf_5m.get('trend','-')} | "
+        f"Struct:{','.join(tf_5m.get('structure',[]) or ['-'])}\n"
+        f"{e5_str}"
+        f"VWAP(sess):{vw5}  C{'+' if (cvv5 or 0)>=0 else ''}{cvv5}%\n"
+        f"S:{_fmt_z5(sup5)}  (nearest {(ds5 or 0):+.1f}%)\n"
+        f"R:{_fmt_z5(res5)}  (nearest {'+' if (dr5 or 0)>=0 else ''}{dr5 or 0}%)\n"
+        f"SWH: {sh5}\n"
+        f"SWL: {sl5}\n"
+    )
+
+    # ── Headline ────────────────────────────────────────────────────────
+    hbits = [f"1h:{bias_1h}", f"5m:{bias_5m}"]
+    if vc: hbits.append(f"VIX:{vc.get('regime')}")
+    if (zc.get("confluence") or {}).get("demand"): hbits.append("confluent-demand")
+    if (zc.get("confluence") or {}).get("supply"): hbits.append("confluent-supply")
+
+    # ── Zones line (from compute_zones — demand/supply impulse zones) ──
+    zones_line = ""
+    if zc:
+        def fmt_z_dz(z):
+            if not z: return "—"
+            tag = "fresh" if z.get("fresh") else f"tested({z.get('touches')})"
+            return f"{z['low']}-{z['high']} {tag}({z.get('dist_pct',0):+.1f}%)"
+        s5m = zc.get("tf_5min", {}); b1h = zc.get("tf_1h", {})
+        zparts = [f"5m  DZ:{fmt_z_dz(s5m.get('demand'))} SZ:{fmt_z_dz(s5m.get('supply'))}",
+                  f"1h  DZ:{fmt_z_dz(b1h.get('demand'))} SZ:{fmt_z_dz(b1h.get('supply'))}"]
+        cf = [k for k in ("demand", "supply") if (zc.get("confluence") or {}).get(k)]
+        if cf: zparts.append("CONFLUENCE:" + "+".join(cf))
+        zones_line = "ZONES:\n  " + "\n  ".join(zparts) + "\n"
+
+    # ── VIX line ────────────────────────────────────────────────────────
+    vix_line = ""
+    if vc:
+        rt  = vc.get("regime_trading", "")
+        t10 = vc.get("trend_10d", "")
+        qb  = vc.get("quantity_bias", "")
+        vix_line = (f"VIX:{vc.get('vix')} | {vc.get('pctile_1y')}pct(1y) | "
+                    f"{vc.get('regime')}"
+                    f"{f' | {rt}' if rt else ''} | "
+                    f"5d:{vc.get('dir_5d')}"
+                    f"{f' 10d:{t10}' if t10 else ''} | "
+                    f"20dRange:{vc.get('pos_20d')}"
+                    f"{f' | size:{qb}' if qb else ''}\n")
+
+    return (
+        f"[{symbol} {date} @{decision_slot}]\n"
+        f"HEADLINE: {' | '.join(hbits)}\n\n"
+        f"{block_1h}\n"
+        f"{block_5m}\n"
+        f"{zones_line}"
+        f"{vix_line}"
     )

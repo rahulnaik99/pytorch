@@ -33,7 +33,7 @@ except ImportError:
     pass
 
 from technicals import TechnicalsAnalyzer
-from prompts import SYSTEM_PROMPT as _SYSTEM, build_prompt
+from prompts import SYSTEM_PROMPT as _SYSTEM, build_prompt, build_prompt_mtf
 
 # ── Config ───────────────────────────────────────────────────────────
 SYMBOL        = os.environ.get("SYMBOL",        "CANBK")
@@ -43,6 +43,8 @@ SYMBOLS       = [s.strip() for s in _SYMBOLS_ENV.split(",") if s.strip()] or [SY
 START_DATE    = os.environ.get("START_DATE",    "2024-01-10")
 END_DATE      = os.environ.get("END_DATE",      "2024-12-31")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", 90))
+N_BARS_1H     = int(os.environ.get("N_BARS_1H",     90))   # 1H candles ≈ 18 sessions
+N_BARS_5M     = int(os.environ.get("N_BARS_5M",     90))   # 5min candles ≈ 7.5 hours
 MAX_HOLD_DAYS = int(os.environ.get("MAX_HOLD_DAYS",  5))
 COUNT         = int(os.environ.get("COUNT",          10))   # random dates to generate
 WORKERS       = int(os.environ.get("WORKERS",         1))    # parallel workers
@@ -345,10 +347,10 @@ def _validate_trade(action: str, entry: float, sl: float, tp: float) -> bool:
     return True  # HOLD always valid
 
 
-def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
+def decide(symbol: str, date: str, tf_1h: dict, tf_5m: dict, vc: dict, zc: dict,
            decision_slot: str = "close") -> tuple[dict, str]:
     """Returns (decision_dict, prompt_text) so the caller can store the exact prompt."""
-    user = build_prompt(symbol, date, tech, vc, zc, decision_slot)
+    user = build_prompt_mtf(symbol, date, tf_1h, tf_5m, vc, zc, decision_slot)
     dec  = _parse_json(_llm_generate(user))
     if dec.get("action") in ("BUY", "SELL", "HOLD"):
         return dec, user
@@ -358,10 +360,13 @@ def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
         return {"action": "HOLD", "stop_loss": 0, "take_profit": 0, "risk_reward": 0,
                 "confidence": 0.0, "reasoning": "__llm_failed__",
                 "features_used": []}, user
-    ns, nr = tech.get("nearest_support"), tech.get("nearest_resistance")
-    cur = tech["close"]
+    # Fallback uses 1H for bias, 5min close as current price (more granular)
+    ns = tf_1h.get("nearest_support")
+    nr = tf_1h.get("nearest_resistance")
+    cur = tf_5m.get("close") or tf_1h.get("close", 0)
     max_risk = CAPITAL_FOR_QTY * RISK_PER_TRADE
-    if tech["ema_stack"].startswith("bullish") and tech["above_vwap"] and ns:
+    above_vwap = cur > (tf_1h.get("vwap") or 0)
+    if tf_1h.get("ema_stack", "").startswith("bullish") and above_vwap and ns:
         sl = round(ns["low"] * 0.998, 2)
         tp = round(nr["mid"] if nr else cur * 1.02, 2)
         rp = max(cur - sl, 0.01)
@@ -370,9 +375,9 @@ def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
         if rr >= 1.5:
             return {"action": "BUY", "quantity": qty, "stop_loss": sl, "take_profit": tp,
                     "risk_reward": rr, "confidence": 0.55,
-                    "reasoning": f"Rule: bullish EMA stack, above VWAP, support {ns['mid']:.1f}",
-                    "features_used": ["ema_stack", "above_vwap", "nearest_support"]}, user
-    if tech["ema_stack"].startswith("bearish") and not tech["above_vwap"] and nr:
+                    "reasoning": f"Rule: bullish 1H EMA stack, above VWAP, support {ns['mid']:.1f}",
+                    "features_used": ["1h_ema_stack", "1h_vwap", "1h_support"]}, user
+    if tf_1h.get("ema_stack", "").startswith("bearish") and not above_vwap and nr:
         sl = round(nr["high"] * 1.002, 2)
         tp = round(ns["mid"] if ns else cur * 0.98, 2)
         rp = max(sl - cur, 0.01)
@@ -381,11 +386,11 @@ def decide(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
         if rr >= 1.5:
             return {"action": "SELL", "quantity": qty, "stop_loss": sl, "take_profit": tp,
                     "risk_reward": rr, "confidence": 0.55,
-                    "reasoning": f"Rule: bearish EMA stack, below VWAP, resistance {nr['mid']:.1f}",
-                    "features_used": ["ema_stack", "above_vwap", "nearest_resistance"]}, user
+                    "reasoning": f"Rule: bearish 1H EMA stack, below VWAP, resistance {nr['mid']:.1f}",
+                    "features_used": ["1h_ema_stack", "1h_vwap", "1h_resistance"]}, user
     return {"action": "HOLD", "stop_loss": 0, "take_profit": 0, "risk_reward": 0,
             "confidence": 0.4, "reasoning": "Rule: no clear setup.",
-            "features_used": ["ema_stack", "above_vwap"]}, user
+            "features_used": ["1h_ema_stack", "1h_vwap"]}, user
 
 
 # ── Outcome simulation ────────────────────────────────────────────────
@@ -479,37 +484,31 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         print(f"  [skip] {symbol} {date} @{slot} already in DB")
         return None
 
-    # 2. Load candles
+    # 2. Load 1H and 5min intraday data (slot-aware look-ahead prevention)
     try:
-        df = ta.load_candles(symbol, date, LOOKBACK_DAYS)
+        df_1h = ta.load_intraday_for_slot(symbol, date, "1h",   N_BARS_1H, slot)
+        df_5m = ta.load_intraday_for_slot(symbol, date, "5min", N_BARS_5M, slot)
     except Exception as e:
-        print(f"  [skip] {symbol} {date} — candles: {e}")
+        print(f"  [skip] {symbol} {date} — intraday load: {e}")
         return None
 
-    # Sanity: last candle should be on or very close to the decision date.
-    # A gap > 10 calendar days usually means the CSV ends before this date.
-    import pandas as _pd
-    last_candle = _pd.Timestamp(df.index[-1]).normalize()
-    gap_days = (_pd.Timestamp(date) - last_candle).days
-    if gap_days > 10:
-        print(f"  [warn] {symbol} {date} — last candle is {last_candle.date()} "
-              f"({gap_days}d gap); CSV may be stale")
+    if len(df_1h) < 30 or len(df_5m) < 30:
+        print(f"  [skip] {symbol} {date} @{slot}: insufficient intraday bars "
+              f"(1H={len(df_1h)} 5M={len(df_5m)})")
+        return None
 
-    # 3. Compute technicals for the chosen slot, VIX, zones
+    # 3. Compute technicals for each timeframe, VIX, zones
     try:
-        tech = ta.compute(df, decision_slot=slot)
+        tech_1h = ta.compute_tf(df_1h, spans=(9, 21, 50), label="1h", pivot_order=5)
+        tech_5m = ta.compute_tf(df_5m, spans=(9, 21, 50), label="5m", pivot_order=2)
     except Exception as e:
-        print(f"  [skip] {symbol} {date} — technicals: {e}")
+        print(f"  [skip] {symbol} {date} — compute_tf: {e}")
         return None
     vc = ta.vix_context(date)
     zc = ta.compute_zones(symbol, date)
-    if vc:
-        tech["vix_ctx"] = vc
-    if zc:
-        tech["zones"] = zc
 
     # 4. LLM decision (returns exact prompt stored in DB for training alignment)
-    dec, prompt_text = decide(symbol, date, tech, vc, zc, decision_slot=slot)
+    dec, prompt_text = decide(symbol, date, tech_1h, tech_5m, vc, zc, decision_slot=slot)
     action  = dec.get("action", "HOLD")
     if action not in ("BUY", "SELL", "HOLD"):
         action = "HOLD"
@@ -537,9 +536,9 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         sl = 0.0
         tp = 0.0
 
-    # planned_entry: LLM's limit price, falls back to current close (market order)
+    # planned_entry: LLM's limit price, falls back to 5min close (most recent price)
     pe_raw = _safe_num(dec.get("planned_entry", 0))
-    planned_entry = pe_raw if pe_raw > 0 else tech["close"]
+    planned_entry = pe_raw if pe_raw > 0 else (tech_5m.get("close") or tech_1h.get("close", 0))
 
     # INVERSE mode: flip BUY→SELL / SELL→BUY and mirror SL/TP symmetrically across entry.
     # Preserves R:R — the original SL distance becomes the new TP distance and vice-versa.
@@ -556,7 +555,7 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
 
     # Warn when SL is less than 30% of the 5-day average range — likely noise-level stop
     if action in ("BUY", "SELL"):
-        rc = tech.get("recent_candles", [])
+        rc = tech_5m.get("recent_candles") or tech_1h.get("recent_candles", [])
         if rc:
             avg_range = sum(c.get("high", 0) - c.get("low", 0) for c in rc) / len(rc)
             sl_dist = abs(planned_entry - sl)
@@ -578,7 +577,7 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         print(f"  [warn] {symbol} {date} @{slot}: {action} trade has empty key_risk")
 
     # 5. Simulate outcome (two-phase if planned_entry differs from current close)
-    entry_p = tech["close"]
+    entry_p = tech_5m.get("close") or tech_1h.get("close", planned_entry)
     try:
         fwd = ta.load_forward(symbol, date, MAX_HOLD_DAYS)
     except Exception:
@@ -616,7 +615,12 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
         "exit_reason": exit_reason, "pnl": pnl,
         "reasoning": rsn, "confidence": conf,
         "features_used": dec.get("features_used", []),
-        "technicals_json": {k: v for k, v in tech.items() if k != "_df"},
+        "technicals_json": {
+            "tf_1h": {k: v for k, v in tech_1h.items() if not k.startswith("_")},
+            "tf_5m": {k: v for k, v in tech_5m.items() if not k.startswith("_")},
+            **({"vix_ctx": vc} if vc else {}),
+            **({"zones":   zc} if zc else {}),
+        },
         "prompt_text": prompt_text,
         "decision_slot": slot,
         "planned_entry": round(planned_entry, 2),
