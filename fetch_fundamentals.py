@@ -21,7 +21,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 try:
@@ -114,10 +114,12 @@ def fetch_symbol(symbol: str) -> bool:
             period_end = col.strftime("%Y-%m-%d")
             period_dt  = col.to_pydatetime() if hasattr(col, "to_pydatetime") else col
 
-            # announcement_date ≈ 3–6 weeks after period end
-            # yfinance columns ARE the reporting date (result announcement date) for most providers;
-            # if not, approximate as +45 days after period end.
-            ann_date = col.strftime("%Y-%m-%d")
+            # announcement_date: Indian banks typically publish results 3–6 weeks after
+            # quarter end (Jan/Apr/Jul/Oct board meetings). yfinance often returns the
+            # period_end date as the column label rather than the actual announcement date,
+            # so we approximate as period_end + 45 days when no better source is available.
+            # Override manually in the JSON if you know the exact BSE/NSE date.
+            ann_date = (period_dt + timedelta(days=45)).strftime("%Y-%m-%d")
 
             # Build quarter dict
             q: dict = {

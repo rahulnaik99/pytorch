@@ -112,7 +112,7 @@ class FundamentalAnalyzer:
         latest = quarters[0]
 
         def _qoq_pct(key: str, idx_new: int, idx_old: int) -> float | None:
-            v_new = latest[key] if idx_new == 0 else quarters[idx_new].get(key)
+            v_new = quarters[idx_new].get(key) if idx_new < len(quarters) else None
             q_old = quarters[idx_old] if idx_old < len(quarters) else None
             if q_old is None:
                 return None

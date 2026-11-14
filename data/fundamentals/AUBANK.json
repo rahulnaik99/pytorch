@@ -1,0 +1,56 @@
+{
+  "symbol": "AUBANK",
+  "exchange": "NSE",
+  "type": "equity",
+  "sector": "Banking",
+  "fetched_at": "2026-11-14T09:45:18Z",
+  "quarters": [
+    {
+      "period": "Q2FY27",
+      "period_end": "2026-09-30",
+      "announcement_date": "2026-11-14",
+      "nii_cr": 2820.08,
+      "pat_cr": 857.69,
+      "revenue_cr": 3590.26,
+      "total_assets_cr": 211803.74,
+      "shareholders_equity_cr": 21809.59,
+      "promoter_pct": 31.39,
+      "fii_pct": 29.93,
+      "dii_pct": 19.95
+    },
+    {
+      "period": "Q1FY27",
+      "period_end": "2026-06-30",
+      "announcement_date": "2026-08-14",
+      "nii_cr": 2695.5,
+      "pat_cr": 795.95,
+      "revenue_cr": 3384.71
+    },
+    {
+      "period": "Q4FY26",
+      "period_end": "2026-03-31",
+      "announcement_date": "2026-05-15",
+      "nii_cr": 2582.33,
+      "pat_cr": 831.87,
+      "revenue_cr": 3313.28,
+      "total_assets_cr": 191797.47,
+      "shareholders_equity_cr": 19973.52
+    },
+    {
+      "period": "Q3FY26",
+      "period_end": "2025-12-31",
+      "announcement_date": "2026-02-14",
+      "nii_cr": 2341.27,
+      "pat_cr": 667.66,
+      "revenue_cr": 3065.07
+    },
+    {
+      "period": "Q1FY26",
+      "period_end": "2025-06-30",
+      "announcement_date": "2025-08-14",
+      "nii_cr": 2044.67,
+      "pat_cr": 580.86,
+      "revenue_cr": 2855.28
+    }
+  ]
+}
