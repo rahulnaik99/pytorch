@@ -1,0 +1,105 @@
+{
+  "symbol": "CANBK",
+  "exchange": "NSE",
+  "type": "equity",
+  "sector": "Banking",
+  "fetched_at": "2024-11-01T00:00:00Z",
+  "quarters": [
+    {
+      "period": "Q2FY25",
+      "period_end": "2024-09-30",
+      "announcement_date": "2024-10-28",
+      "nii_cr": 3390.0,
+      "pat_cr": 4014.0,
+      "total_assets_cr": 1014000.0,
+      "shareholders_equity_cr": 76000.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 6.8,
+      "dii_pct": 14.2
+    },
+    {
+      "period": "Q1FY25",
+      "period_end": "2024-06-30",
+      "announcement_date": "2024-07-25",
+      "nii_cr": 3282.0,
+      "pat_cr": 3905.0,
+      "total_assets_cr": 990000.0,
+      "shareholders_equity_cr": 73500.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 6.5,
+      "dii_pct": 14.5
+    },
+    {
+      "period": "Q4FY24",
+      "period_end": "2024-03-31",
+      "announcement_date": "2024-05-08",
+      "nii_cr": 3211.0,
+      "pat_cr": 3757.0,
+      "total_assets_cr": 975000.0,
+      "shareholders_equity_cr": 71200.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 6.2,
+      "dii_pct": 14.9
+    },
+    {
+      "period": "Q3FY24",
+      "period_end": "2023-12-31",
+      "announcement_date": "2024-02-05",
+      "nii_cr": 3145.0,
+      "pat_cr": 3656.0,
+      "total_assets_cr": 955000.0,
+      "shareholders_equity_cr": 68800.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 6.0,
+      "dii_pct": 15.1
+    },
+    {
+      "period": "Q2FY24",
+      "period_end": "2023-09-30",
+      "announcement_date": "2023-10-30",
+      "nii_cr": 3012.0,
+      "pat_cr": 3583.0,
+      "total_assets_cr": 930000.0,
+      "shareholders_equity_cr": 66200.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 5.8,
+      "dii_pct": 15.4
+    },
+    {
+      "period": "Q1FY24",
+      "period_end": "2023-06-30",
+      "announcement_date": "2023-07-27",
+      "nii_cr": 2900.0,
+      "pat_cr": 3288.0,
+      "total_assets_cr": 905000.0,
+      "shareholders_equity_cr": 63700.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 5.5,
+      "dii_pct": 15.8
+    },
+    {
+      "period": "Q4FY23",
+      "period_end": "2023-03-31",
+      "announcement_date": "2023-05-12",
+      "nii_cr": 2785.0,
+      "pat_cr": 3180.0,
+      "total_assets_cr": 880000.0,
+      "shareholders_equity_cr": 61200.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 5.2,
+      "dii_pct": 16.1
+    },
+    {
+      "period": "Q3FY23",
+      "period_end": "2022-12-31",
+      "announcement_date": "2023-02-02",
+      "nii_cr": 2650.0,
+      "pat_cr": 2895.0,
+      "total_assets_cr": 855000.0,
+      "shareholders_equity_cr": 59000.0,
+      "promoter_pct": 62.93,
+      "fii_pct": 5.0,
+      "dii_pct": 16.5
+    }
+  ]
+}

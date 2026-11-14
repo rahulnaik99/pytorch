@@ -34,12 +34,29 @@ except ImportError:
 
 from technicals import TechnicalsAnalyzer
 from prompts import SYSTEM_PROMPT as _SYSTEM, build_prompt, build_prompt_mtf
+from fundamentals import FundamentalAnalyzer
 
 # ── Config ───────────────────────────────────────────────────────────
 SYMBOL        = os.environ.get("SYMBOL",        "CANBK")
 # Multiple symbols: SYMBOLS=CANBK,HDFC,INFY overrides SYMBOL
 _SYMBOLS_ENV  = os.environ.get("SYMBOLS",       "")
 SYMBOLS       = [s.strip() for s in _SYMBOLS_ENV.split(",") if s.strip()] or [SYMBOL]
+
+# Banking sector stocks (NSE) — use SYMBOLS=... env to override, or BANKING_SYMBOLS for all
+BANKING_SYMBOLS = [
+    # Private banks
+    "HDFCBANK", "ICICIBANK", "AXISBANK", "KOTAKBANK", "INDUSINDBK",
+    "IDFCFIRSTB", "FEDERALBNK", "BANDHANBNK", "YESBANK", "AUBANK", "CUB",
+    # Public sector banks
+    "SBIN", "PNB", "BANKBARODA", "CANBK", "UNIONBANK", "BANKINDIA", "INDIANB",
+    # Index — no fundamentals, 15-year data file
+    "BANKNIFTY",
+]
+# Symbols treated as market indices — fundamental analysis is skipped
+INDEX_SYMBOLS: frozenset[str] = frozenset({
+    "BANKNIFTY", "NIFTYBANK", "NIFTY50", "SENSEX", "NIFTY_BANK",
+})
+
 START_DATE    = os.environ.get("START_DATE",    "2024-01-10")
 END_DATE      = os.environ.get("END_DATE",      "2024-12-31")
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", 90))
@@ -348,9 +365,9 @@ def _validate_trade(action: str, entry: float, sl: float, tp: float) -> bool:
 
 
 def decide(symbol: str, date: str, tf_1h: dict, tf_5m: dict, vc: dict, zc: dict,
-           decision_slot: str = "close") -> tuple[dict, str]:
+           fd: dict = None, decision_slot: str = "close") -> tuple[dict, str]:
     """Returns (decision_dict, prompt_text) so the caller can store the exact prompt."""
-    user = build_prompt_mtf(symbol, date, tf_1h, tf_5m, vc, zc, decision_slot)
+    user = build_prompt_mtf(symbol, date, tf_1h, tf_5m, vc, zc, fd, decision_slot)
     dec  = _parse_json(_llm_generate(user))
     if dec.get("action") in ("BUY", "SELL", "HOLD"):
         return dec, user
@@ -474,7 +491,8 @@ def trade_costs(entry: float, exit_p: float, qty: int, action: str) -> float:
 # ── Core: one sample per date ─────────────────────────────────────────
 
 def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
-                    slot: str | None = None) -> dict | None:
+                    slot: str | None = None,
+                    fa: "FundamentalAnalyzer | None" = None) -> dict | None:
     # Determine slot (random if not specified)
     if slot is None:
         slot = random.choice(["open", "mid", "close"])
@@ -507,8 +525,16 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
     vc = ta.vix_context(date)
     zc = ta.compute_zones(symbol, date)
 
+    # 3b. Fundamental context (banking stocks only — indices skip this)
+    fd = None
+    if fa is not None and symbol.upper() not in INDEX_SYMBOLS:
+        try:
+            fd = fa.summarize(symbol, date)
+        except Exception as e:
+            print(f"  [warn] {symbol} {date}: fundamentals failed: {e}")
+
     # 4. LLM decision (returns exact prompt stored in DB for training alignment)
-    dec, prompt_text = decide(symbol, date, tech_1h, tech_5m, vc, zc, decision_slot=slot)
+    dec, prompt_text = decide(symbol, date, tech_1h, tech_5m, vc, zc, fd=fd, decision_slot=slot)
     action  = dec.get("action", "HOLD")
     if action not in ("BUY", "SELL", "HOLD"):
         action = "HOLD"
@@ -620,6 +646,7 @@ def generate_sample(ta: TechnicalsAnalyzer, symbol: str, date: str,
             "tf_5m": {k: v for k, v in tech_5m.items() if not k.startswith("_")},
             **({"vix_ctx": vc} if vc else {}),
             **({"zones":   zc} if zc else {}),
+            **({"fundamentals": fd} if fd else {}),
         },
         "prompt_text": prompt_text,
         "decision_slot": slot,
@@ -689,9 +716,10 @@ if __name__ == "__main__":
         print("Nothing to do. Extend START_DATE/END_DATE or add more symbols.")
     elif WORKERS <= 1:
         ta = TechnicalsAnalyzer()
+        fa = FundamentalAnalyzer()
         generated = 0
         for sym, date, slot in work:
-            row = generate_sample(ta, sym, date, slot)
+            row = generate_sample(ta, sym, date, slot, fa=fa)
             if row:
                 _store(row)
                 generated += 1
@@ -726,11 +754,17 @@ if __name__ == "__main__":
                 ta_shared._load_minute(sym)
             except Exception:
                 pass
+        # FundamentalAnalyzer caches JSON files — pre-warm for all symbols.
+        # Cache is a plain dict; after preload, workers only read (CPython GIL safe).
+        fa_shared = FundamentalAnalyzer()
+        for sym in {s for s, _, _ in work}:
+            if sym.upper() not in INDEX_SYMBOLS:
+                fa_shared._load(sym)
 
         def _job(item: tuple[str, str, str]) -> dict | None:
             sym, date, slot = item
-            # ta_shared caches are fully populated — workers only read (CPython GIL safe)
-            row = generate_sample(ta_shared, sym, date, slot)
+            # ta_shared and fa_shared caches are fully populated — workers only read (GIL safe)
+            row = generate_sample(ta_shared, sym, date, slot, fa=fa_shared)
             if row:
                 _store(row)
             return row

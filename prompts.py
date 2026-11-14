@@ -19,7 +19,7 @@ Output ONLY valid JSON:
   "risk_reward": <float>,
   "reasoning": "<2-3 sentences citing specific prices and indicator values>",
   "confidence": <0.0-1.0>,
-  "features_used": ["1h_ema_stack", "5m_structure", "1h_support", "5m_demand_zone"],
+  "features_used": ["1h_ema_stack", "5m_structure", "1h_support", "fundamentals_nii_rising"],
   "key_risk": "<one-line failure scenario>"
 }"""
 
@@ -193,7 +193,8 @@ def build_prompt(symbol: str, date: str, tech: dict, vc: dict, zc: dict,
 # ── Multi-timeframe prompt builder ────────────────────────────────────
 
 def build_prompt_mtf(symbol: str, date: str, tf_1h: dict, tf_5m: dict,
-                     vc: dict, zc: dict, decision_slot: str = "close") -> str:
+                     vc: dict, zc: dict, fd: dict = None,
+                     decision_slot: str = "close") -> str:
     """Two-section prompt: 1H long context + 5min short setup."""
 
     def _bias(stack: str) -> str:
@@ -353,11 +354,44 @@ def build_prompt_mtf(symbol: str, date: str, tf_1h: dict, tf_5m: dict,
                     f"20dRange:{vc.get('pos_20d')}"
                     f"{f' | size:{qb}' if qb else ''}\n")
 
+    # ── Fundamentals line (banking sector; absent for indices) ───────
+    fund_line = ""
+    if fd:
+        def _sign(v):
+            if v is None: return "—"
+            return f"{'+' if v >= 0 else ''}{v:.1f}%"
+        def _sign_pp(v):
+            if v is None: return ""
+            return f"({'+' if v >= 0 else ''}{v:.2f}pp)"
+        def _trend(trend, streak):
+            if streak and streak >= 2:
+                return f"{trend} {streak}Q"
+            return trend
+        nii_str    = f"{_sign(fd.get('nii_qoq_pct'))} QoQ | {_trend(fd.get('nii_trend','—'), fd.get('nii_streak',0))}"
+        pat_str    = f"{_sign(fd.get('pat_qoq_pct'))} QoQ | {_trend(fd.get('pat_trend','—'), fd.get('pat_streak',0))}"
+        assets_str = f"{_sign(fd.get('assets_qoq_pct'))} QoQ | {fd.get('assets_trend','—')}"
+        p_pct = fd.get('promoter_pct')
+        f_pct = fd.get('fii_pct')
+        d_pct = fd.get('dii_pct')
+        hold_parts = []
+        if p_pct is not None: hold_parts.append(f"Promoter:{p_pct}%{_sign_pp(fd.get('promoter_delta_pp'))}")
+        if f_pct is not None: hold_parts.append(f"FII:{f_pct}%{_sign_pp(fd.get('fii_delta_pp'))}")
+        if d_pct is not None: hold_parts.append(f"DII:{d_pct}%{_sign_pp(fd.get('dii_delta_pp'))}")
+        hold_str = " | ".join(hold_parts) if hold_parts else "—"
+        fund_line = (
+            f"FUNDAMENTALS [{fd.get('symbol','—')}, {fd.get('as_of_quarter','—')}]:\n"
+            f"  NII: {nii_str}\n"
+            f"  Net Profit: {pat_str}\n"
+            f"  Total Assets: {assets_str}\n"
+            f"  {hold_str}\n"
+        )
+
     return (
         f"[{symbol} {date} @{decision_slot}]\n"
         f"HEADLINE: {' | '.join(hbits)}\n\n"
         f"{block_1h}\n"
         f"{block_5m}\n"
         f"{zones_line}"
+        f"{fund_line}"
         f"{vix_line}"
     )
